@@ -38,7 +38,7 @@ Turkce odakli, yerel calisan, gizlilik dostu ses-yazi donusturucu. Whisper AI mo
 
 ```bash
 # 1. Repoyu klonla
-git clone https://github.com/AhmetHTTP/fisilti.git
+git clone https://github.com/ustaz34/fisilti.git
 cd fisilti
 
 # 2. npm bagimliklarini yukle
