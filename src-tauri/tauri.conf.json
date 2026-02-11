@@ -14,8 +14,8 @@
       {
         "label": "overlay",
         "title": "Fısıltı",
-        "width": 380,
-        "height": 90,
+        "width": 300,
+        "height": 48,
         "resizable": false,
         "decorations": false,
         "transparent": true,

@@ -184,8 +184,8 @@ fn position_overlay_on_monitor(_window: &tauri::WebviewWindow, monitor: &tauri::
     let mon_size = monitor.size();      // fiziksel piksel
 
     // Hedef monitorun DPI'sina gore fiziksel boyut
-    let phys_w = (380.0 * scale) as i32;
-    let phys_h = (90.0 * scale) as i32;
+    let phys_w = (300.0 * scale) as i32;
+    let phys_h = (48.0 * scale) as i32;
 
     // Fiziksel koordinatlarda pozisyon hesapla
     let x = mon_pos.x + (mon_size.width as i32 - phys_w) / 2;
@@ -311,22 +311,14 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
             fn GetWindowRect(hwnd: isize, rect: *mut [i32; 4]) -> i32;
             fn LoadLibraryA(name: *const u8) -> isize;
             fn GetProcAddress(module: isize, name: *const u8) -> isize;
-            fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, w: i32, h: i32, f: u32) -> i32;
             fn DefWindowProcW(hwnd: isize, msg: u32, wp: usize, lp: isize) -> isize;
             fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wp: usize, lp: isize) -> isize;
         }
 
         const GWL_EXSTYLE: i32 = -20;
-        const GWL_STYLE: i32 = -16;
         const GWLP_WNDPROC: i32 = -4;
         const WS_EX_NOACTIVATE: isize = 0x08000000;
         const WS_EX_TOOLWINDOW: isize = 0x00000080;
-        const WS_POPUP: isize = 0x80000000u32 as isize;
-        const WS_OVERLAPPEDWINDOW: isize = 0x00CF0000;
-        const SWP_NOMOVE: u32 = 0x0002;
-        const SWP_NOSIZE: u32 = 0x0001;
-        const SWP_NOZORDER: u32 = 0x0004;
-        const SWP_FRAMECHANGED: u32 = 0x0020;
         const WM_DPICHANGED: u32 = 0x02E0;
         const WM_NCHITTEST: u32 = 0x0084;
         const HTTRANSPARENT: isize = -1;
@@ -440,14 +432,11 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
             let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
 
-            // WS_POPUP: tum dekorasyonlari kaldir
-            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-            SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_OVERLAPPEDWINDOW) | WS_POPUP);
+            // NOT: WS_POPUP ve SWP_FRAMECHANGED KULLANILMIYOR
+            // Tauri'nin decorations:false zaten dekorasyonlari kaldiriyor.
+            // WS_POPUP + SWP_FRAMECHANGED Tauri'nin seffaflik mekanizmasini bozuyordu.
 
-            // Stil degisikliklerini uygula
-            SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-
-            // DWM: seffaflik + cerceve/border kaldir
+            // DWM: seffaflik + cerceve/border kaldir + gecis animasyonlarini kapat
             let dwm = LoadLibraryA(b"dwmapi.dll\0".as_ptr());
             if dwm != 0 {
                 let ext_fn = GetProcAddress(dwm, b"DwmExtendFrameIntoClientArea\0".as_ptr());
@@ -460,9 +449,14 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
                 let attr_fn = GetProcAddress(dwm, b"DwmSetWindowAttribute\0".as_ptr());
                 if attr_fn != 0 {
                     let f: unsafe extern "system" fn(isize, u32, *const u32, u32) -> i32 = std::mem::transmute(attr_fn);
-                    let v: u32 = 1; // DWMWCP_DONOTROUND
+                    // DWMWA_TRANSITIONS_FORCEDISABLED = 2 → monitor gecis animasyonunu kapat
+                    let v: u32 = 1;
+                    f(hwnd, 2, &v, 4);
+                    // DWMWCP_DONOTROUND = 1
+                    let v: u32 = 1;
                     f(hwnd, 33, &v, 4);
-                    let v: u32 = 0xFFFFFFFE; // DWMWA_COLOR_NONE
+                    // DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE
+                    let v: u32 = 0xFFFFFFFE;
                     f(hwnd, 34, &v, 4);
                 }
             }
@@ -471,10 +465,27 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
         }
 
         // Seffaflik duzeltme workaround (Tauri v2 #8308)
+        // Resize sonrasi DWM frame extension tekrar uygulanmali
         if let Some(window) = app_handle.get_webview_window("overlay") {
             window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(1.0, 1.0))).ok();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(300.0, 48.0))).ok();
             std::thread::sleep(std::time::Duration::from_millis(50));
-            window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(380.0, 90.0))).ok();
+
+            // DWM frame extension'i resize sonrasi tekrar uygula
+            unsafe {
+                let dwm = LoadLibraryA(b"dwmapi.dll\0".as_ptr());
+                if dwm != 0 {
+                    let ext_fn = GetProcAddress(dwm, b"DwmExtendFrameIntoClientArea\0".as_ptr());
+                    if ext_fn != 0 {
+                        #[repr(C)]
+                        struct M2 { l: i32, r: i32, t: i32, b: i32 }
+                        let f: unsafe extern "system" fn(isize, *const M2) -> i32 = std::mem::transmute(ext_fn);
+                        f(hwnd, &M2 { l: -1, r: -1, t: -1, b: -1 });
+                    }
+                }
+            }
+
             snap_overlay_to_bottom(&window);
             eprintln!("[fisilti] Overlay seffaflik workaround uygulandi");
         }

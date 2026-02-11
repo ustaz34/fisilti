@@ -49,10 +49,11 @@ body {
   align-items: flex-end;
   justify-content: center;
   background: transparent !important;
-  contain: layout style;
+  pointer-events: none;
 }
 
 .overlay-bar {
+  pointer-events: auto;
   width: 64px;
   height: 5px;
   display: flex;
@@ -66,7 +67,6 @@ body {
   overflow: hidden;
   position: relative;
   box-shadow: 0 -1px 8px rgba(var(--accent-rgb), 0.06);
-  will-change: width, height, opacity, box-shadow;
   transition:
     width 0.4s cubic-bezier(0.22, 1, 0.36, 1),
     height 0.4s cubic-bezier(0.22, 1, 0.36, 1),
