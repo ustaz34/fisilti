@@ -91,6 +91,11 @@ pub fn run() {
             // Overlay penceresi - baslik temizle, konumlandir, goster
             if let Some(window) = app.get_webview_window("overlay") {
                 window.set_title("").ok();
+
+                // WebView2 arka planini tam seffaf yap (beyaz tabaka sorunu icin)
+                use tauri::webview::Color;
+                window.set_background_color(Some(Color(0, 0, 0, 0))).ok();
+
                 snap_overlay_to_bottom(&window);
                 window.show().ok();
 
@@ -316,11 +321,17 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
         }
 
         const GWL_EXSTYLE: i32 = -20;
+        const GWL_STYLE: i32 = -16;
         const GWLP_WNDPROC: i32 = -4;
         const WS_EX_NOACTIVATE: isize = 0x08000000;
         const WS_EX_TOOLWINDOW: isize = 0x00000080;
+        const WS_CAPTION: isize = 0x00C00000;
+        const WS_THICKFRAME: isize = 0x00040000;
+        const WS_BORDER: isize = 0x00800000;
         const WM_DPICHANGED: u32 = 0x02E0;
         const WM_NCHITTEST: u32 = 0x0084;
+        const WM_NCACTIVATE: u32 = 0x0086;
+        const WM_ACTIVATE: u32 = 0x0006;
         const HTTRANSPARENT: isize = -1;
 
         extern "system" {
@@ -333,6 +344,16 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
         /// - WM_NCHITTEST: seffaf alanlari tiklamaya gecirgen yapar
         unsafe extern "system" fn overlay_wndproc(hwnd: isize, msg: u32, wp: usize, lp: isize) -> isize {
             if msg == WM_DPICHANGED {
+                return 0;
+            }
+
+            // Aktivasyon/fokus mesajlarini engelle — beyaz cerceve goruntusunu onler
+            if msg == WM_NCACTIVATE {
+                // Non-client alanin yeniden cizilmesini engelle (cerceve flash'i)
+                return 0;
+            }
+            if msg == WM_ACTIVATE {
+                // Pencerenin aktif olmasini engelle
                 return 0;
             }
 
@@ -428,13 +449,17 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
             ORIGINAL_WNDPROC.store(orig, Ordering::Release);
             eprintln!("[fisilti] WndProc subclass uygulandi, orig={}", orig);
 
-            // WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW
+            // WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW (WS_EX_LAYERED yok — WebView2 ile uyumsuz)
             let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE,
+                ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+            );
 
-            // NOT: WS_POPUP ve SWP_FRAMECHANGED KULLANILMIYOR
-            // Tauri'nin decorations:false zaten dekorasyonlari kaldiriyor.
-            // WS_POPUP + SWP_FRAMECHANGED Tauri'nin seffaflik mekanizmasini bozuyordu.
+            // Pencere stilinden caption/border/frame tamamen kaldir
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            SetWindowLongPtrW(hwnd, GWL_STYLE,
+                style & !WS_CAPTION & !WS_THICKFRAME & !WS_BORDER
+            );
 
             // DWM: seffaflik + cerceve/border kaldir + gecis animasyonlarini kapat
             let dwm = LoadLibraryA(b"dwmapi.dll\0".as_ptr());

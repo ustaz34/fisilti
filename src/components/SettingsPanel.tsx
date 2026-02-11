@@ -200,6 +200,7 @@ const STATUS_MAP: Record<WakeWordStatus, { label: string; color: string; pulse?:
   requesting_mic: { label: "Mikrofon isteniyor",  color: "#f5c842", pulse: true },
   starting:       { label: "Baslatiliyor...",     color: "#f5c842", pulse: true },
   listening:      { label: "Dinliyor",            color: "#4ade80", pulse: true },
+  hearing:        { label: "Duyulan: ...",        color: "#4ade80", pulse: true },
   error:          { label: "Hata",                color: "#f87171" },
   detected:       { label: "Algilandi!",          color: "#fae4cf", pulse: true },
   no_support:     { label: "Desteklenmiyor",      color: "#f87171" },
@@ -217,7 +218,9 @@ function VoiceStatus() {
           style={{ background: info.color, boxShadow: info.pulse ? `0 0 8px ${info.color}` : "none" }} />
       </div>
       <div className="sp-voice-label">
-        <span className="sp-voice-label-text" style={{ color: info.color }}>{info.label}</span>
+        <span className="sp-voice-label-text" style={{ color: info.color }}>
+          {status === "hearing" && errorMsg ? `Duyulan: ${errorMsg}` : info.label}
+        </span>
         {errorMsg && status === "error" && <span className="sp-voice-err">{errorMsg}</span>}
       </div>
     </div>

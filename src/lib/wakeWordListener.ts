@@ -63,11 +63,20 @@ function matchesWakeWord(text: string): boolean {
     if (lower.includes(variant)) return true;
   }
 
-  // "fısıltı" icin ek olarak "whisper" ingilizcesini de yakala
+  // "fısıltı" icin ek olarak fonetik varyantlari ve "whisper" ingilizcesini de yakala
   if (currentWakeWord === "fısıltı" || currentWakeWord === "fisılti" || currentWakeWord === "fisilti") {
     if (lower.includes("whisper")) return true;
+    if (lower.includes("whisp")) return true;
     if (lower.includes("fısıl")) return true;
     if (lower.includes("fisil")) return true;
+    if (lower.includes("fisilt")) return true;
+    if (lower.includes("fısılt")) return true;
+    if (lower.includes("visil")) return true;
+    if (lower.includes("vısıl")) return true;
+    if (lower.includes("visilt")) return true;
+    if (lower.includes("fıs")) return true;
+    if (lower.includes("fis")) return true;
+    if (lower.includes("wis")) return true;
   }
 
   return false;
@@ -114,10 +123,13 @@ function startSession(language: string, onWakeWord: () => void) {
   rec.lang = toBcp47Locale(language);
   rec.continuous = true;
   rec.interimResults = true;
-  rec.maxAlternatives = 5;
+  rec.maxAlternatives = 10;
 
   rec.onresult = (event: SpeechRecognitionEvent) => {
     if (mySession !== sessionCounter) return;
+    // Her sonuçta son duyulan metni gönder
+    const lastTranscript = event.results[event.results.length - 1][0].transcript;
+    reportStatus("hearing", lastTranscript.trim());
     for (let i = event.resultIndex; i < event.results.length; i++) {
       for (let j = 0; j < event.results[i].length; j++) {
         if (matchesWakeWord(event.results[i][j].transcript)) {
@@ -187,7 +199,7 @@ function startSession(language: string, onWakeWord: () => void) {
           if (shouldRestart && mySession === sessionCounter) {
             startSession(language, onWakeWord);
           }
-        }, 500);
+        }, 200);
       }
       return;
     }
@@ -244,7 +256,7 @@ export async function startWakeWordListener(
     if (shouldRestart) {
       startSession(language, onWakeWord);
     }
-  }, 150);
+  }, 50);
 }
 
 export function stopWakeWordListener(): void {

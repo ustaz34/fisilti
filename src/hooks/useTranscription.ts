@@ -267,7 +267,7 @@ function doForceStop() {
   if (engine === "web") {
     stopWebSpeech().then((text) => {
       useRecordingStore.getState().setRecording(false);
-      if (text) playDeactivationSound();
+      if (text) playDeactivationSound(); else playErrorSound();
       finishWithText(text, "web").then(() => {
         restartWakeWordIfEnabled();
       });
@@ -287,6 +287,7 @@ function doForceStop() {
           playDeactivationSound();
           await finishWithText(result.text, "whisper");
         } else {
+          playErrorSound();
           useTranscriptionStore.getState().setCurrentText("");
         }
       } catch (err) {
@@ -371,7 +372,7 @@ function handleWakeWord() {
               clearSilenceMonitor();
               useRecordingStore.getState().setRecording(false);
               const text = getFinalTranscript();
-              if (text) playDeactivationSound();
+              if (text) playDeactivationSound(); else playErrorSound();
               finishWithText(text, "web").then(() => {
                 restartWakeWordIfEnabled();
               });
@@ -413,9 +414,8 @@ export function useTranscription() {
     recordingStartTime = Date.now();
     playActivationSound();
 
-    // Backend'den ayarlari yeniden yukle
-    try {
-      const saved = await getSettings();
+    // Backend'den ayarlari arka planda yukle (kaydi BLOKLAMADAN)
+    getSettings().then((saved) => {
       useSettingsStore.getState().updateSettings({
         selectedModel: saved.selected_model,
         selectedDevice: saved.selected_device ?? null,
@@ -444,16 +444,11 @@ export function useTranscription() {
         logLevel: saved.log_level ?? "info",
         paragraphBreak: saved.paragraph_break ?? false,
       });
-    } catch {
+    }).catch(() => {
       // Yuklenemezse mevcut store degerlerini kullan
-    }
+    });
 
-    // doStop bu arada cagrildiysa erken cik
-    if (!isActive) {
-      useRecordingStore.getState().setRecording(false);
-      return;
-    }
-
+    // Mevcut store degerlerini hemen kullan (IPC beklemeden)
     const engine = useSettingsStore.getState().settings.transcriptionEngine;
 
     try {
@@ -490,7 +485,7 @@ export function useTranscription() {
               clearSilenceMonitor();
               useRecordingStore.getState().setRecording(false);
               const text = getFinalTranscript();
-              if (text) playDeactivationSound();
+              if (text) playDeactivationSound(); else playErrorSound();
               finishWithText(text, "web").then(() => {
                 restartWakeWordIfEnabled();
               });
@@ -529,7 +524,7 @@ export function useTranscription() {
     if (engine === "web") {
       const text = await stopWebSpeech();
       useRecordingStore.getState().setRecording(false);
-      if (text) playDeactivationSound();
+      if (text) playDeactivationSound(); else playErrorSound();
       await finishWithText(text, "web");
       restartWakeWordIfEnabled();
     } else {
@@ -550,6 +545,7 @@ export function useTranscription() {
             playDeactivationSound();
             await finishWithText(result.text, "whisper");
           } else {
+            playErrorSound();
             useTranscriptionStore.getState().setCurrentText("");
           }
         } catch (err) {

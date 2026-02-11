@@ -69,6 +69,7 @@ export function SettingsApp() {
           autoCapitalization: saved.auto_capitalization ?? true,
           preserveEnglishWords: saved.preserve_english_words ?? true,
           autoComma: saved.auto_comma ?? true,
+          paragraphBreak: saved.paragraph_break ?? false,
           notifications: saved.notifications ?? true,
           logLevel: saved.log_level ?? "info",
         });
@@ -100,6 +101,37 @@ export function SettingsApp() {
     const handleVisibility = () => {
       if (document.visibilityState === "visible") {
         useTranscriptionStore.getState().loadHistory();
+        getSettings()
+          .then((saved) => {
+            updateSettings({
+              selectedModel: saved.selected_model,
+              selectedDevice: saved.selected_device ?? null,
+              theme: saved.theme as "dark" | "light",
+              shortcut: saved.shortcut,
+              recordingMode: saved.recording_mode as "button" | "auto" | "shortcut",
+              vadThreshold: saved.vad_threshold,
+              autoPaste: saved.auto_paste,
+              language: saved.language,
+              transcriptionEngine: (saved.transcription_engine as "whisper" | "web") || "web",
+              voiceActivation: saved.voice_activation ?? false,
+              wakeWord: saved.wake_word ?? "fısıltı",
+              soundEnabled: saved.sound_enabled ?? true,
+              autoStart: saved.auto_start ?? false,
+              silenceTimeout: saved.silence_timeout ?? 4,
+              maxRecordDuration: saved.max_record_duration ?? 60,
+              turkishCorrections: saved.turkish_corrections ?? true,
+              hallucinationFilter: saved.hallucination_filter ?? true,
+              overlayFollowCursor: saved.overlay_follow_cursor ?? true,
+              autoPunctuation: saved.auto_punctuation ?? true,
+              autoCapitalization: saved.auto_capitalization ?? true,
+              preserveEnglishWords: saved.preserve_english_words ?? true,
+              autoComma: saved.auto_comma ?? true,
+              paragraphBreak: saved.paragraph_break ?? false,
+              notifications: saved.notifications ?? true,
+              logLevel: saved.log_level ?? "info",
+            });
+          })
+          .catch(console.error);
       }
     };
     document.addEventListener("visibilitychange", handleVisibility);

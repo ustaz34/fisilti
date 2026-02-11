@@ -14,10 +14,11 @@ export interface ThemePalette {
   textMuted: string;
 }
 
-export type OverlayStyle = "default" | "pill" | "neon" | "minimal" | "glass" | "wave";
-export type OverlayAnimation = "smooth" | "bounce" | "slide" | "scale" | "elastic" | "snap";
-export type WaveformStyle = "classic" | "thin" | "thick" | "pulse" | "mirror" | "bars";
+export type OverlayStyle = "default" | "pill" | "neon" | "minimal" | "glass" | "wave" | "frost" | "ember" | "sharp" | "float";
+export type OverlayAnimation = "smooth" | "bounce" | "slide" | "scale" | "elastic" | "snap" | "drop" | "twist" | "fade" | "ripple";
+export type WaveformStyle = "classic" | "thin" | "thick" | "pulse" | "mirror" | "bars" | "dot" | "helix" | "spectrum" | "scatter" | "zigzag" | "orbit";
 export type GlowIntensity = "none" | "subtle" | "medium" | "intense";
+export type SoundPack = "varsayilan" | "kristal" | "mekanik" | "yumusak" | "bip" | "tok" | "pop" | "zil" | "dalga" | "sessiz";
 
 export interface ThemeConfig {
   paletteId: string;
@@ -25,6 +26,7 @@ export interface ThemeConfig {
   overlayAnimation: OverlayAnimation;
   waveformStyle: WaveformStyle;
   glowIntensity: GlowIntensity;
+  soundPack: SoundPack;
 }
 
 export const DEFAULT_CONFIG: ThemeConfig = {
@@ -33,6 +35,7 @@ export const DEFAULT_CONFIG: ThemeConfig = {
   overlayAnimation: "smooth",
   waveformStyle: "classic",
   glowIntensity: "medium",
+  soundPack: "varsayilan",
 };
 
 // ── Accent RGB Cache (Canvas bilesenleri icin) ──
@@ -263,6 +266,10 @@ export const OVERLAY_STYLES: OptionDef<OverlayStyle>[] = [
   { id: "minimal", name: "Minimal", desc: "Ultra ince cizgi" },
   { id: "glass", name: "Cam", desc: "Glassmorphism blur" },
   { id: "wave", name: "Dalga", desc: "Genis dalga formu" },
+  { id: "frost", name: "Buzul", desc: "Soguk bulaniklastirma" },
+  { id: "ember", name: "Kor", desc: "Sicak kor parlama" },
+  { id: "sharp", name: "Keskin", desc: "Sivri kose tasarim" },
+  { id: "float", name: "Suzen", desc: "Havada suzen efekt" },
 ];
 
 export const OVERLAY_ANIMATIONS: OptionDef<OverlayAnimation>[] = [
@@ -272,6 +279,10 @@ export const OVERLAY_ANIMATIONS: OptionDef<OverlayAnimation>[] = [
   { id: "scale", name: "Buyume", desc: "Merkezden buyur" },
   { id: "elastic", name: "Elastik", desc: "Lastik bant efekti" },
   { id: "snap", name: "Ani", desc: "Aninda acilir" },
+  { id: "drop", name: "Dusme", desc: "Yukdan asagi duser" },
+  { id: "twist", name: "Burulma", desc: "Donerek acilir" },
+  { id: "fade", name: "Belirme", desc: "Yavas belirir" },
+  { id: "ripple", name: "Dalga", desc: "Dalga etkisiyle acilir" },
 ];
 
 export const WAVEFORM_STYLES: OptionDef<WaveformStyle>[] = [
@@ -281,6 +292,12 @@ export const WAVEFORM_STYLES: OptionDef<WaveformStyle>[] = [
   { id: "pulse", name: "Nabiz", desc: "Kalp atisi seklinde" },
   { id: "mirror", name: "Ayna", desc: "Ust-alt simetrik" },
   { id: "bars", name: "Cubuklar", desc: "Dikey cubuk ekolayzir" },
+  { id: "dot", name: "Noktalar", desc: "Ziplayan daireler" },
+  { id: "helix", name: "Sarmal", desc: "Cift helis DNA stili" },
+  { id: "spectrum", name: "Spektrum", desc: "Dolgulu dalga alani" },
+  { id: "scatter", name: "Serpinti", desc: "Dagilan parcaciklar" },
+  { id: "zigzag", name: "Zigzag", desc: "Keskin acili cizgiler" },
+  { id: "orbit", name: "Yorunge", desc: "Donen dairesel hareket" },
 ];
 
 export const GLOW_INTENSITIES: OptionDef<GlowIntensity>[] = [
@@ -288,6 +305,19 @@ export const GLOW_INTENSITIES: OptionDef<GlowIntensity>[] = [
   { id: "subtle", name: "Hafif", desc: "Belli belirsiz isik" },
   { id: "medium", name: "Orta", desc: "Dengeli parlama" },
   { id: "intense", name: "Yogun", desc: "Guclu neon parlama" },
+];
+
+export const SOUND_PACKS: OptionDef<SoundPack>[] = [
+  { id: "varsayilan", name: "Varsayilan", desc: "Sicak ve tok ping sesi" },
+  { id: "kristal", name: "Kristal", desc: "Yuksek tonlu cam tini" },
+  { id: "mekanik", name: "Mekanik", desc: "Dijital kare dalga bip" },
+  { id: "yumusak", name: "Yumusak", desc: "Derin ve sakin ton" },
+  { id: "bip", name: "Bip", desc: "Kisa klasik bip sesi" },
+  { id: "tok", name: "Tok", desc: "Derin ve guclu vurus" },
+  { id: "pop", name: "Pop", desc: "Balon patlama efekti" },
+  { id: "zil", name: "Zil", desc: "Ince metalik zil sesi" },
+  { id: "dalga", name: "Dalga", desc: "Yukselen dalga efekti" },
+  { id: "sessiz", name: "Sessiz", desc: "Ses efekti kapatilir" },
 ];
 
 export function getPaletteById(id: string): ThemePalette {

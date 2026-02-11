@@ -33,6 +33,7 @@ export type WakeWordStatus =
   | "requesting_mic"
   | "starting"
   | "listening"
+  | "hearing"
   | "error"
   | "detected"
   | "no_support";
