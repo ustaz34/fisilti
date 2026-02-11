@@ -2,6 +2,14 @@
 
 Turkce odakli, yerel calisan, gizlilik dostu ses-yazi donusturucu. Whisper AI modelini bilgisayarinda calistirarak sesinizi metne cevirir — internet veya bulut servisi gerektirmez.
 
+## Hizli Indirme (Windows)
+
+**[Fisilti v0.1.0 Indir (Windows 64-bit)](https://github.com/ustaz34/fisilti/releases/latest/download/Fisilti_0.1.0_x64-setup.exe)**
+
+Indir → Cift tikla → Kur → Kullan. Hepsi bu.
+
+> Ilk acilista Ayarlar > Model sekmesinden bir Whisper modeli indirmeniz gerekir (onerilen: Large V3 Turbo Q5, 574 MB).
+
 ## Ozellikler
 
 - **Tamamen yerel**: Whisper.cpp modelleri bilgisayarda calisir, ses verisi hicbir yere gonderilmez
