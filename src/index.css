@@ -1922,6 +1922,85 @@ body {
   line-height: 1.5;
 }
 
+/* ── Status Badge ── */
+.lrn-status-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  color: rgba(0, 0, 0, 0.8);
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+/* ── Confidence Bar ── */
+.lrn-confidence-bar {
+  width: 48px;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.lrn-confidence-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+/* ── Pending Approvals ── */
+.lrn-pending {
+  margin-bottom: 12px;
+}
+.lrn-pending-header {
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(250, 204, 21, 0.7);
+  margin-bottom: 6px;
+  padding: 0 4px;
+}
+.lrn-pending-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(250, 204, 21, 0.04);
+  border: 1px solid rgba(250, 204, 21, 0.08);
+  margin-bottom: 3px;
+  font-size: 10px;
+}
+.lrn-pending-approve,
+.lrn-pending-reject {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 12px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+.lrn-pending-approve {
+  color: rgba(74, 222, 128, 0.6);
+}
+.lrn-pending-approve:hover {
+  color: rgba(74, 222, 128, 1);
+  background: rgba(74, 222, 128, 0.1);
+}
+.lrn-pending-reject {
+  color: rgba(248, 113, 113, 0.6);
+}
+.lrn-pending-reject:hover {
+  color: rgba(248, 113, 113, 1);
+  background: rgba(248, 113, 113, 0.1);
+}
+
 /* ═══════════════════════════════════════════════
    Overlay Bar Stil Varyantlari
    ═══════════════════════════════════════════════ */

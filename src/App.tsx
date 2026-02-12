@@ -37,7 +37,11 @@ function App() {
           autoPaste: saved.auto_paste,
           language: saved.language,
           transcriptionEngine:
-            (saved.transcription_engine as "whisper" | "web") || "web",
+            (saved.transcription_engine as "whisper" | "web" | "deepgram" | "azure" | "google-cloud") || "web",
+          deepgramApiKey: saved.deepgram_api_key ?? "",
+          azureSpeechKey: saved.azure_speech_key ?? "",
+          azureSpeechRegion: saved.azure_speech_region ?? "",
+          googleCloudApiKey: saved.google_cloud_api_key ?? "",
           voiceActivation: saved.voice_activation ?? false,
           wakeWord: saved.wake_word ?? "fısıltı",
           soundEnabled: saved.sound_enabled ?? true,

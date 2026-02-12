@@ -19,6 +19,18 @@ import {
   getResultConfidence,
 } from "../lib/webSpeechService";
 import {
+  startDeepgram,
+  stopDeepgram,
+  getDeepgramTranscript,
+} from "../lib/deepgramService";
+import {
+  startAzureSpeech,
+  stopAzureSpeech,
+  getAzureTranscript,
+} from "../lib/azureSpeechService";
+import { transcribeWithGoogleCloud } from "../lib/googleCloudSpeechService";
+import { useUsageStore } from "../stores/usageStore";
+import {
   startWakeWordListener,
   stopWakeWordListener,
 } from "../lib/wakeWordListener";
@@ -32,6 +44,10 @@ import {
   stopBrowserAudioMonitor,
   getBrowserAudioLevel,
 } from "../lib/browserAudioMonitor";
+import {
+  startSileroVad,
+  stopSileroVad,
+} from "../lib/sileroVadService";
 
 // ---- Modul seviyesi paylasilan durum ----
 let isActive = false;
@@ -65,6 +81,8 @@ function clearSilenceMonitor() {
   hasDetectedSpeech = false;
   // Browser audio monitor'u da temizle (Web Speech icin)
   stopBrowserAudioMonitor().catch(() => {});
+  // Silero VAD'i durdur
+  stopSileroVad().catch(() => {});
 }
 
 /**
@@ -74,10 +92,10 @@ function clearSilenceMonitor() {
 function startSilenceMonitor() {
   clearSilenceMonitor();
   const settings = useSettingsStore.getState().settings;
-  // RMS degerleri cpal'de tipik konusma icin 0.01-0.10 araliginda.
-  // vadThreshold (0-1) UI'da yuzde olarak gosteriliyor, ama RMS icin
-  // cok yuksek. Olcekle: 0.3 -> 0.03 gibi makul bir esige donustur.
-  const threshold = Math.max((settings.vadThreshold || 0.3) * 0.1, 0.005);
+  // cpal RMS: tipik konusma 0.01-0.10, sessizlik <0.005
+  // vadThreshold UI'da 0-1 arasi (0.3 = orta hassasiyet)
+  // Dogru olcekleme: 0.3 → 0.008 (yumusak konusmayı da yakala)
+  const threshold = Math.max((settings.vadThreshold || 0.3) * 0.025, 0.003);
   const silenceTimeoutMs = getSilenceTimeoutMs();
   const minSpeechBeforeStop = 1500;
   const noSpeechTimeoutMs = 10000;
@@ -126,12 +144,66 @@ function startSilenceMonitor() {
 async function startBrowserSilenceMonitor() {
   clearSilenceMonitor();
   const settings = useSettingsStore.getState().settings;
-  const threshold = Math.max((settings.vadThreshold || 0.3) * 0.1, 0.005);
   const silenceTimeoutMs = getSilenceTimeoutMs();
   const minSpeechBeforeStop = 1500;
-  const noSpeechTimeoutMs = 10000;
 
-  // Tarayici ses izlemeyi baslat
+  // Silero VAD'i dene — basarili olursa cok daha dogru konusma algilama
+  let sileroSpeechActive = false;
+  let sileroSpeechEndTime = 0;
+  const sileroOk = await startSileroVad(
+    () => {
+      // Konusma basladi
+      sileroSpeechActive = true;
+      hasDetectedSpeech = true;
+      silenceStartTime = 0;
+    },
+    () => {
+      // Konusma bitti
+      sileroSpeechActive = false;
+      sileroSpeechEndTime = Date.now();
+    },
+  );
+
+  if (sileroOk) {
+    // Silero VAD aktif — sessizlik timeout'unu Silero eventleri ile kontrol et
+    silenceMonitorTimer = setInterval(() => {
+      if (!isActive) {
+        clearSilenceMonitor();
+        return;
+      }
+
+      if (sileroSpeechActive) {
+        silenceStartTime = 0;
+        return;
+      }
+
+      // Konusma algilandi ve simdi sessizlik var
+      if (hasDetectedSpeech && sileroSpeechEndTime > 0) {
+        const elapsed = Date.now() - recordingStartTime;
+        const silenceDuration = Date.now() - sileroSpeechEndTime;
+
+        if (elapsed > minSpeechBeforeStop && silenceDuration >= silenceTimeoutMs) {
+          clearSilenceMonitor();
+          doForceStop();
+        }
+      }
+
+      // Hic konusma algilanmadiysa 10sn sonra durdur
+      if (!hasDetectedSpeech) {
+        const elapsed = Date.now() - recordingStartTime;
+        if (elapsed > 10000) {
+          clearSilenceMonitor();
+          doForceStop();
+        }
+      }
+    }, 200);
+    return;
+  }
+
+  // Silero basarisiz — frekans-tabanli VAD fallback
+  // Frekans-bandi RMS: konusma ~0.005-0.05, sessizlik <0.002
+  const threshold = Math.max((settings.vadThreshold || 0.3) * 0.015, 0.002);
+  const noSpeechTimeoutMs = 10000;
   const deviceId = settings.selectedDevice ?? undefined;
   await startBrowserAudioMonitor(deviceId);
 
@@ -192,7 +264,9 @@ function getMaxRecordDurationMs(): number {
   return duration * 1000;
 }
 
-async function finishWithText(text: string, engineOverride?: "web" | "whisper") {
+type EngineType = "web" | "whisper" | "deepgram" | "azure" | "google-cloud";
+
+async function finishWithText(text: string, engineOverride?: EngineType) {
   if (!text) {
     useTranscriptionStore.getState().setCurrentText("");
     return;
@@ -202,13 +276,12 @@ async function finishWithText(text: string, engineOverride?: "web" | "whisper") 
   const durationMs = Date.now() - recordingStartTime;
   const engine = engineOverride || settings.transcriptionEngine;
 
-  // Web Speech sonuclarini da backend'de isle (noktalama, duzeltme vs.)
+  // Web Speech ve bulut motor sonuclarini backend'de isle (noktalama, duzeltme vs.)
   let processedText = text;
   let originalText: string | undefined;
-  if (engine === "web") {
+  if (engine === "web" || engine === "deepgram" || engine === "azure" || engine === "google-cloud") {
     try {
       processedText = await processText(text);
-      // Web Speech ham metin != islenmis metin ise originalText olarak kaydet
       if (processedText !== text) {
         originalText = text;
       }
@@ -217,6 +290,19 @@ async function finishWithText(text: string, engineOverride?: "web" | "whisper") 
     }
   }
 
+  // Kullanim takibi — bulut motorlari icin
+  if (engine === "deepgram" || engine === "azure" || engine === "google-cloud") {
+    const provider = engine === "google-cloud" ? "googleCloud" : engine;
+    useUsageStore.getState().addUsage(provider as "deepgram" | "azure" | "googleCloud", durationMs);
+  }
+
+  const modelIdMap: Record<string, string> = {
+    web: "web-speech",
+    deepgram: "deepgram-nova-3",
+    azure: "azure-speech",
+    "google-cloud": "google-cloud-chirp",
+  };
+
   useTranscriptionStore.getState().setCurrentText(processedText);
   useTranscriptionStore.getState().addToHistory({
     id: Date.now().toString(),
@@ -224,9 +310,9 @@ async function finishWithText(text: string, engineOverride?: "web" | "whisper") 
     originalText,
     timestamp: Date.now(),
     durationMs,
-    engine: engine as "web" | "whisper",
+    engine: engine as EngineType,
     language: settings.language,
-    modelId: engine === "web" ? "web-speech" : settings.selectedModel,
+    modelId: modelIdMap[engine] || settings.selectedModel,
     confidence: engine === "web" ? getResultConfidence() : undefined,
   });
 
@@ -272,7 +358,55 @@ function doForceStop() {
         restartWakeWordIfEnabled();
       });
     });
+  } else if (engine === "deepgram") {
+    stopDeepgram().then((text) => {
+      useRecordingStore.getState().setRecording(false);
+      if (text) playDeactivationSound(); else playErrorSound();
+      finishWithText(text, "deepgram").then(() => {
+        restartWakeWordIfEnabled();
+      });
+    });
+  } else if (engine === "azure") {
+    stopAzureSpeech().then((text) => {
+      useRecordingStore.getState().setRecording(false);
+      if (text) playDeactivationSound(); else playErrorSound();
+      finishWithText(text, "azure").then(() => {
+        restartWakeWordIfEnabled();
+      });
+    });
+  } else if (engine === "google-cloud") {
+    // Google Cloud batch mod — Whisper gibi kayit durdur + transkript
+    stopRecording().then(async (audioData) => {
+      useRecordingStore.getState().setRecording(false);
+      useRecordingStore.getState().setAudioData(audioData);
+      useTranscriptionStore.getState().setTranscribing(true);
+      useTranscriptionStore.getState().setCurrentText("Donusturuluyor...");
+      try {
+        const apiKey = useSettingsStore.getState().settings.googleCloudApiKey;
+        const lang = useSettingsStore.getState().settings.language;
+        const text = await transcribeWithGoogleCloud(apiKey, audioData, lang);
+        if (text) {
+          playDeactivationSound();
+          await finishWithText(text, "google-cloud");
+        } else {
+          playErrorSound();
+          useTranscriptionStore.getState().setCurrentText("");
+        }
+      } catch (err) {
+        playErrorSound();
+        useTranscriptionStore.getState().setCurrentText(`Hata: ${err}`);
+      } finally {
+        useTranscriptionStore.getState().setTranscribing(false);
+      }
+      restartWakeWordIfEnabled();
+    }).catch((err) => {
+      playErrorSound();
+      useTranscriptionStore.getState().setCurrentText(`Kayit durdurma hatasi: ${err}`);
+      useRecordingStore.getState().setRecording(false);
+      restartWakeWordIfEnabled();
+    });
   } else {
+    // Whisper
     stopRecording().then(async (audioData) => {
       useRecordingStore.getState().setRecording(false);
       useRecordingStore.getState().setAudioData(audioData);
@@ -346,7 +480,6 @@ function handleWakeWord() {
     }
 
     const lang = settings.language;
-    // Kisa gecikme: tarayicinin onceki SpeechRecognition'i serbest birakmasi icin
     setTimeout(() => {
       startWebSpeech(
         lang,
@@ -364,7 +497,6 @@ function handleWakeWord() {
             );
           },
           onEnd: () => {
-            // Auto-stop veya beklenmedik kapanma
             if (isActive) {
               isActive = false;
               clearDurationTimer();
@@ -381,9 +513,87 @@ function handleWakeWord() {
         },
         { autoStopAfterSilenceMs: getSilenceTimeoutMs() },
       );
-      // VAD esigi ile tarayici tarafli sessizlik izlemeyi baslat
       startBrowserSilenceMonitor();
     }, 100);
+  } else if (engine === "deepgram") {
+    const apiKey = settings.deepgramApiKey;
+    const lang = settings.language;
+    setTimeout(() => {
+      startDeepgram(apiKey, lang, {
+        onInterimResult: (text) => {
+          useTranscriptionStore.getState().setCurrentText(text);
+        },
+        onFinalResult: (text) => {
+          useTranscriptionStore.getState().setCurrentText(text);
+        },
+        onError: (error) => {
+          playErrorSound();
+          useTranscriptionStore.getState().setCurrentText(`Deepgram hatasi: ${error}`);
+        },
+        onEnd: () => {
+          if (isActive) {
+            isActive = false;
+            clearDurationTimer();
+            clearMaxDurationTimer();
+            clearSilenceMonitor();
+            useRecordingStore.getState().setRecording(false);
+            const text = getDeepgramTranscript();
+            if (text) playDeactivationSound(); else playErrorSound();
+            finishWithText(text, "deepgram").then(() => {
+              restartWakeWordIfEnabled();
+            });
+          }
+        },
+      });
+      startBrowserSilenceMonitor();
+    }, 100);
+  } else if (engine === "azure") {
+    const key = settings.azureSpeechKey;
+    const region = settings.azureSpeechRegion;
+    const lang = settings.language;
+    setTimeout(() => {
+      startAzureSpeech(key, region, lang, {
+        onInterimResult: (text) => {
+          useTranscriptionStore.getState().setCurrentText(text);
+        },
+        onFinalResult: (text) => {
+          useTranscriptionStore.getState().setCurrentText(text);
+        },
+        onError: (error) => {
+          playErrorSound();
+          useTranscriptionStore.getState().setCurrentText(`Azure hatasi: ${error}`);
+        },
+        onEnd: () => {
+          if (isActive) {
+            isActive = false;
+            clearDurationTimer();
+            clearMaxDurationTimer();
+            clearSilenceMonitor();
+            useRecordingStore.getState().setRecording(false);
+            const text = getAzureTranscript();
+            if (text) playDeactivationSound(); else playErrorSound();
+            finishWithText(text, "azure").then(() => {
+              restartWakeWordIfEnabled();
+            });
+          }
+        },
+      });
+    }, 100);
+  } else if (engine === "google-cloud") {
+    // Google Cloud batch mod — Whisper gibi kayit baslat + sessizlik izleme
+    const device = settings.selectedDevice ?? undefined;
+    startRecording(device).then(() => {
+      startSilenceMonitor();
+    }).catch((err) => {
+      isActive = false;
+      clearDurationTimer();
+      clearMaxDurationTimer();
+      clearSilenceMonitor();
+      useRecordingStore.getState().setRecording(false);
+      useTranscriptionStore.getState().setCurrentText(`Kayit hatasi: ${err}`);
+      playErrorSound();
+      restartWakeWordIfEnabled();
+    });
   } else {
     // Whisper modunda wake word - kayit baslat + sessizlik izleme
     const device = settings.selectedDevice ?? undefined;
@@ -426,7 +636,11 @@ export function useTranscription() {
         autoPaste: saved.auto_paste,
         language: saved.language,
         transcriptionEngine:
-          (saved.transcription_engine as "whisper" | "web") || "web",
+          (saved.transcription_engine as EngineType) || "web",
+        deepgramApiKey: saved.deepgram_api_key ?? "",
+        azureSpeechKey: saved.azure_speech_key ?? "",
+        azureSpeechRegion: saved.azure_speech_region ?? "",
+        googleCloudApiKey: saved.google_cloud_api_key ?? "",
         voiceActivation: saved.voice_activation ?? false,
         wakeWord: saved.wake_word ?? "fısıltı",
         soundEnabled: saved.sound_enabled ?? true,
@@ -492,9 +706,74 @@ export function useTranscription() {
             }
           },
         }, { autoStopAfterSilenceMs: getSilenceTimeoutMs() });
-        // VAD esigi ile tarayici tarafli sessizlik izlemeyi baslat
         startBrowserSilenceMonitor();
+      } else if (engine === "deepgram") {
+        const s = useSettingsStore.getState().settings;
+        if (!s.deepgramApiKey) throw new Error("Deepgram API key girilmemis");
+        startDeepgram(s.deepgramApiKey, s.language, {
+          onInterimResult: (text) => {
+            useTranscriptionStore.getState().setCurrentText(text);
+          },
+          onFinalResult: (text) => {
+            useTranscriptionStore.getState().setCurrentText(text);
+          },
+          onError: (error) => {
+            playErrorSound();
+            useTranscriptionStore.getState().setCurrentText(`Deepgram hatasi: ${error}`);
+          },
+          onEnd: () => {
+            if (isActive) {
+              isActive = false;
+              clearDurationTimer();
+              clearMaxDurationTimer();
+              clearSilenceMonitor();
+              useRecordingStore.getState().setRecording(false);
+              const text = getDeepgramTranscript();
+              if (text) playDeactivationSound(); else playErrorSound();
+              finishWithText(text, "deepgram").then(() => {
+                restartWakeWordIfEnabled();
+              });
+            }
+          },
+        });
+        startBrowserSilenceMonitor();
+      } else if (engine === "azure") {
+        const s = useSettingsStore.getState().settings;
+        if (!s.azureSpeechKey || !s.azureSpeechRegion) throw new Error("Azure Speech key veya region girilmemis");
+        await startAzureSpeech(s.azureSpeechKey, s.azureSpeechRegion, s.language, {
+          onInterimResult: (text) => {
+            useTranscriptionStore.getState().setCurrentText(text);
+          },
+          onFinalResult: (text) => {
+            useTranscriptionStore.getState().setCurrentText(text);
+          },
+          onError: (error) => {
+            playErrorSound();
+            useTranscriptionStore.getState().setCurrentText(`Azure hatasi: ${error}`);
+          },
+          onEnd: () => {
+            if (isActive) {
+              isActive = false;
+              clearDurationTimer();
+              clearMaxDurationTimer();
+              clearSilenceMonitor();
+              useRecordingStore.getState().setRecording(false);
+              const text = getAzureTranscript();
+              if (text) playDeactivationSound(); else playErrorSound();
+              finishWithText(text, "azure").then(() => {
+                restartWakeWordIfEnabled();
+              });
+            }
+          },
+        });
+      } else if (engine === "google-cloud") {
+        // Google Cloud batch mod — Whisper gibi kayit baslat
+        const s = useSettingsStore.getState().settings;
+        if (!s.googleCloudApiKey) throw new Error("Google Cloud API key girilmemis");
+        const device = s.selectedDevice ?? undefined;
+        await startRecording(device);
       } else {
+        // Whisper
         const device =
           useSettingsStore.getState().settings.selectedDevice ?? undefined;
         await startRecording(device);
@@ -527,7 +806,51 @@ export function useTranscription() {
       if (text) playDeactivationSound(); else playErrorSound();
       await finishWithText(text, "web");
       restartWakeWordIfEnabled();
+    } else if (engine === "deepgram") {
+      const text = await stopDeepgram();
+      useRecordingStore.getState().setRecording(false);
+      if (text) playDeactivationSound(); else playErrorSound();
+      await finishWithText(text, "deepgram");
+      restartWakeWordIfEnabled();
+    } else if (engine === "azure") {
+      const text = await stopAzureSpeech();
+      useRecordingStore.getState().setRecording(false);
+      if (text) playDeactivationSound(); else playErrorSound();
+      await finishWithText(text, "azure");
+      restartWakeWordIfEnabled();
+    } else if (engine === "google-cloud") {
+      // Google Cloud batch mod — kayit durdur + transkript
+      try {
+        const audioData = await stopRecording();
+        useRecordingStore.getState().setRecording(false);
+        useRecordingStore.getState().setAudioData(audioData);
+        useTranscriptionStore.getState().setTranscribing(true);
+        useTranscriptionStore.getState().setCurrentText("Donusturuluyor...");
+
+        try {
+          const s = useSettingsStore.getState().settings;
+          const text = await transcribeWithGoogleCloud(s.googleCloudApiKey, audioData, s.language);
+          if (text) {
+            playDeactivationSound();
+            await finishWithText(text, "google-cloud");
+          } else {
+            playErrorSound();
+            useTranscriptionStore.getState().setCurrentText("");
+          }
+        } catch (err) {
+          playErrorSound();
+          useTranscriptionStore.getState().setCurrentText(`Hata: ${err}`);
+        } finally {
+          useTranscriptionStore.getState().setTranscribing(false);
+        }
+      } catch (err) {
+        playErrorSound();
+        useTranscriptionStore.getState().setCurrentText(`Kayit durdurma hatasi: ${err}`);
+        useRecordingStore.getState().setRecording(false);
+      }
+      restartWakeWordIfEnabled();
     } else {
+      // Whisper
       try {
         const audioData = await stopRecording();
         useRecordingStore.getState().setRecording(false);

@@ -3,7 +3,7 @@ import { useTranscriptionStore, type TranscriptionEntry } from "../stores/transc
 
 /* ═══════════ HistoryPanel ═══════════ */
 
-type EngineFilter = "all" | "web" | "whisper";
+type EngineFilter = "all" | "web" | "whisper" | "deepgram" | "azure" | "google-cloud";
 
 export function HistoryPanel() {
   const { history, loadHistory, editEntry, clearHistory } = useTranscriptionStore();
@@ -111,16 +111,22 @@ export function HistoryPanel() {
           className="lrn-dict-search"
         />
         <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          {(["all", "web", "whisper"] as EngineFilter[]).map((f) => (
-            <button
-              key={f}
-              onClick={() => setEngineFilter(f)}
-              className={`lrn-action-btn ${engineFilter === f ? "lrn-action-btn--active" : ""}`}
-              style={{ padding: "3px 10px", fontSize: 9 }}
-            >
-              {f === "all" ? "Tumu" : f === "web" ? "Web" : "Whisper"}
-            </button>
-          ))}
+          {(["all", "web", "whisper", "deepgram", "azure", "google-cloud"] as EngineFilter[]).map((f) => {
+            const labels: Record<string, string> = {
+              all: "Tumu", web: "Web", whisper: "Whisper",
+              deepgram: "Deepgram", azure: "Azure", "google-cloud": "G.Cloud",
+            };
+            return (
+              <button
+                key={f}
+                onClick={() => setEngineFilter(f)}
+                className={`lrn-action-btn ${engineFilter === f ? "lrn-action-btn--active" : ""}`}
+                style={{ padding: "3px 10px", fontSize: 9 }}
+              >
+                {labels[f]}
+              </button>
+            );
+          })}
           <span style={{ flex: 1 }} />
           <span style={{ fontSize: 9, color: "rgba(255,255,255,0.15)" }}>
             {filtered.length} kayit

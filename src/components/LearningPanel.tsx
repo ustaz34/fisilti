@@ -10,6 +10,8 @@ import {
   resetLearningData,
   exportCorrections,
   importCorrections,
+  promoteCorrection,
+  demoteCorrection,
   type UserCorrection,
   type UserProfile,
   type DynamicPromptPreview,
@@ -207,6 +209,69 @@ function DomainDetection({ domainInfo }: { domainInfo: DomainInfo | null }) {
   );
 }
 
+/* ═══════════ Status Badge ═══════════ */
+
+const STATUS_COLORS: Record<string, string> = {
+  Pending: "#eab308",     // sari
+  Confirmed: "#3b82f6",   // mavi
+  Active: "#22c55e",      // yesil
+  Deprecated: "#6b7280",  // gri
+};
+
+function StatusBadge({ status }: { status: string }) {
+  const color = STATUS_COLORS[status] || "#6b7280";
+  return (
+    <span className="lrn-status-badge" style={{ backgroundColor: color }}>{status}</span>
+  );
+}
+
+function ConfidenceBar({ value }: { value: number }) {
+  const pct = Math.min(Math.max(value * 100, 0), 100);
+  const color = pct >= 50 ? "#22c55e" : pct >= 20 ? "#eab308" : "#ef4444";
+  return (
+    <div className="lrn-confidence-bar">
+      <div className="lrn-confidence-fill" style={{ width: `${pct}%`, backgroundColor: color }} />
+    </div>
+  );
+}
+
+/* ═══════════ Pending Approvals ═══════════ */
+
+function PendingApprovals({ corrections, onRefresh }: {
+  corrections: UserCorrection[]; onRefresh: () => void;
+}) {
+  const pending = useMemo(() =>
+    corrections.filter(c => c.status === "Pending").sort((a, b) => b.count - a.count),
+  [corrections]);
+
+  if (pending.length === 0) return null;
+
+  const handlePromote = async (wrong: string) => {
+    try { await promoteCorrection(wrong); onRefresh(); }
+    catch (e) { console.error("Yukseltme hatasi:", e); }
+  };
+  const handleDemote = async (wrong: string) => {
+    try { await demoteCorrection(wrong); onRefresh(); }
+    catch (e) { console.error("Dusurme hatasi:", e); }
+  };
+
+  return (
+    <div className="lrn-pending">
+      <div className="lrn-pending-header">Onay Bekleyenler ({pending.length})</div>
+      {pending.slice(0, 10).map(c => (
+        <div key={c.wrong} className="lrn-pending-row">
+          <span className="lrn-dict-wrong">{c.wrong}</span>
+          <span className="lrn-dict-arrow-sm">→</span>
+          <span className="lrn-dict-right">{c.right}</span>
+          <span className="lrn-dict-count">{c.count}x</span>
+          <button onClick={() => handlePromote(c.wrong)} className="lrn-pending-approve" title="Onayla">✓</button>
+          <button onClick={() => handleDemote(c.wrong)} className="lrn-pending-reject" title="Reddet">✗</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ═══════════ Correction Dictionary ═══════════ */
 
 function CorrectionDictionary({ corrections, onRefresh }: {
@@ -279,10 +344,12 @@ function CorrectionDictionary({ corrections, onRefresh }: {
         <div className="lrn-dict-table">
           {filtered.map(c => (
             <div key={c.wrong} className="lrn-dict-row group">
+              <StatusBadge status={c.status} />
               <span className="lrn-dict-wrong">{c.wrong}</span>
               <span className="lrn-dict-arrow-sm">→</span>
               <span className="lrn-dict-right">{c.right}</span>
               <span className="lrn-dict-count">{c.count}x</span>
+              <ConfidenceBar value={c.confidence} />
               <button onClick={() => handleRemove(c.wrong)} className="lrn-dict-del">
                 <svg width="8" height="8" viewBox="0 0 10 10"><line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /><line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
               </button>
@@ -404,6 +471,9 @@ export function LearningPanel() {
       {/* Alan Tespiti */}
       <Lbl text="Alan Tespiti" />
       <DomainDetection domainInfo={domainInfo} />
+
+      {/* Onay Bekleyenler */}
+      <PendingApprovals corrections={corrections} onRefresh={loadAll} />
 
       {/* Duzeltme Sozlugu */}
       <Lbl text="Duzeltme Sozlugu" />

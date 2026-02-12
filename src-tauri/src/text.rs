@@ -54,9 +54,16 @@ pub fn process_text_full(
         text
     };
 
-    // Kullanici duzeltme sozlugu uygula (3+ tekrar olanlar)
+    // Fonetik benzerlik duzeltmeleri (sessiz konusma icin)
+    let text = if turkish_corrections && language == "tr" {
+        apply_phonetic_fuzzy_corrections(&text)
+    } else {
+        text
+    };
+
+    // Kullanici duzeltme sozlugu uygula — ek-farkindalikli (3+ tekrar olanlar)
     let text = if let Some(corrections) = user_corrections {
-        crate::corrections::apply_user_corrections(&text, corrections)
+        apply_suffix_aware_user_corrections(&text, corrections)
     } else {
         text
     };
@@ -612,6 +619,24 @@ fn apply_turkish_corrections_with_flags(text: &str, preserve_english: bool) -> S
         ("soguk", "soğuk"),
         ("komsuluk", "komşuluk"),
         ("dusman", "düşman"),
+        // Ek duzeltmeler — Web Speech ve Whisper'in sik yaptigi hatalar
+        ("goruntusu", "görüntüsü"),
+        ("goruntulu", "görüntülü"),
+        ("olustur", "oluştur"),
+        ("olusum", "oluşum"),
+        ("gelismis", "gelişmiş"),
+        ("calistir", "çalıştır"),
+        ("aciklama", "açıklama"),
+        ("bicimde", "biçimde"),
+        ("gosterge", "gösterge"),
+        ("dogrulama", "doğrulama"),
+        ("degerlendirme", "değerlendirme"),
+        ("ozguven", "özgüven"),
+        ("ustunluk", "üstünlük"),
+        ("gorunum", "görünüm"),
+        ("goruntu", "görüntü"),
+        ("duzenleme", "düzenleme"),
+        ("duzenlemek", "düzenlemek"),
     ];
 
     for (wrong, correct) in &corrections {
@@ -630,20 +655,22 @@ fn is_word_char(ch: char) -> bool {
     ch.is_alphabetic() || ch == '\'' || ch == '\u{2019}'
 }
 
-/// Sadece tam kelime eslesmelerini degistir (Unicode-aware)
+/// Sadece tam kelime eslesmelerini degistir (Unicode-aware, UTF-8 guvenli)
 fn replace_whole_word(text: &str, word: &str, replacement: &str) -> String {
     let mut result = String::new();
     let text_lower = text.to_lowercase();
     let word_lower = word.to_lowercase();
     let mut last_end = 0;
 
-    for (idx, _) in text_lower.match_indices(&word_lower) {
+    for (idx, matched_str) in text_lower.match_indices(&word_lower) {
+        // UTF-8 guvenli: match_indices dogrudan eslesen string'in byte uzunlugunu verir
+        let after_idx = idx + matched_str.len();
+
         // Unicode-aware kelime siniri kontrolu
         let before_ok = idx == 0 || {
             let prev_char = text[..idx].chars().last().unwrap_or(' ');
             !is_word_char(prev_char)
         };
-        let after_idx = idx + word.len();
         let after_ok = after_idx >= text.len() || {
             let next_char = text[after_idx..].chars().next().unwrap_or(' ');
             !is_word_char(next_char)
@@ -658,7 +685,7 @@ fn replace_whole_word(text: &str, word: &str, replacement: &str) -> String {
 
             result.push_str(&text[last_end..idx]);
             // Orijinal metindeki buyuk/kucuk harf durumunu koru
-            if text[idx..idx + 1].chars().next().map_or(false, |c| c.is_uppercase()) {
+            if text[idx..].chars().next().map_or(false, |c| c.is_uppercase()) {
                 let mut chars = replacement.chars();
                 if let Some(first) = chars.next() {
                     result.push(first.to_uppercase().next().unwrap_or(first));
@@ -798,11 +825,24 @@ fn punctuate_turkish_with_flags(sentence: &str, auto_comma: bool) -> String {
 
     // Soru eki kontrolu
     let question_suffixes = [
+        // Temel soru ekleri (4 unlu uyumu)
         "mi", "mı", "mu", "mü",
+        // 2. tekil (sen)
         "mısın", "misin", "musun", "müsün",
+        // 1. tekil (ben)
+        "miyim", "mıyım", "muyum", "müyüm",
+        // 1. cogul (biz)
         "miyiz", "mıyız", "muyuz", "müyüz",
+        // 2. cogul (siz)
         "mısınız", "misiniz", "musunuz", "müsünüz",
+        // 3. tekil resmi (o)
         "mudur", "müdür", "midir", "mıdır",
+        // Gecmis zaman soru
+        "miydi", "mıydı", "muydu", "müydü",
+        "miydim", "mıydım", "muydum", "müydüm",
+        "miydin", "mıydın", "muydun", "müydün",
+        // Sart soru
+        "miyse", "mıysa", "muysa", "müyse",
         // Bilesik soru ekleri
         "değilmi", "değilmı", "olurmu", "olmuzmu",
         "edermi", "yaparmi", "gelirmi", "gidermi",
@@ -1178,12 +1218,24 @@ fn detect_repetition(text: &str) -> bool {
         return false;
     }
 
+    // Beyaz liste: mesru tekrar kelimeleri (filtrelenMEmeli)
+    const ALLOWED_REPETITIONS: &[&str] = &[
+        "evet", "hayır", "tamam", "peki", "lütfen", "haydi",
+        "gel", "dur", "sus", "bak", "alo",
+    ];
+
     // Tum metin ayni kelimenin tekrarindan mi olusuyor?
     let unique_words: std::collections::HashSet<String> = words.iter().map(|w| w.to_lowercase()).collect();
 
-    // Eger benzersiz kelime sayisi toplam kelime sayisinin %20'sinden azsa
-    // VE toplam kelime sayisi 6'dan fazlaysa -> halusinasyon
-    if unique_words.len() <= 2 && words.len() >= 6 {
+    // Benzersiz kelime sayisi 1 ise VE 6+ kelime varsa kesin halusinasyon
+    // 2 benzersiz kelime icin en az 8+ kelime olmali (orn: "hayir hayir hayir" 3 kelime = gecerli)
+    if unique_words.len() == 1 && words.len() >= 4 {
+        let the_word = words[0].to_lowercase();
+        if !ALLOWED_REPETITIONS.contains(&the_word.as_str()) {
+            return true;
+        }
+    }
+    if unique_words.len() == 2 && words.len() >= 8 {
         return true;
     }
 
@@ -1214,6 +1266,253 @@ fn detect_repetition(text: &str) -> bool {
     false
 }
 
+// ── Turkce ek soyma (suffix stripping) ──
+
+/// Public wrapper — corrections.rs'den erisim icin
+pub fn strip_turkish_suffixes_pub(word: &str) -> (String, String) {
+    strip_turkish_suffixes(word)
+}
+
+/// Turkce kelimenin eklerini soyarak (govde, ekler) cifti dondurur.
+/// Basit morfolojik analiz — en uzun eslesen eki soyer.
+fn strip_turkish_suffixes(word: &str) -> (String, String) {
+    let lower = word.to_lowercase();
+    if lower.len() < 4 {
+        return (lower, String::new());
+    }
+
+    // En uzun ekten en kisasina dogru dene — greedy matching
+    // Siralama: uzun ekler once (cakismalari onlemek icin)
+    let suffixes: &[&str] = &[
+        // 5+ harfli ekler
+        "lerinden", "larından", "lerine", "larına", "lerini", "larını",
+        "leriyle", "larıyla", "lerinde", "larında", "lerinin", "larının",
+        // 4 harfli ekler
+        "leri", "ları", "ler", "lar",
+        "inde", "ında", "inin", "ının",
+        "ine", "ına", "ini", "ını",
+        "iyle", "ıyla", "yle", "yla",
+        "den", "dan", "ten", "tan",
+        "nde", "nda",
+        // 3 harfli ekler
+        "nin", "nın", "nün", "nun",
+        "lik", "lık", "lük", "luk",
+        "sız", "siz", "süz", "suz",
+        // 2 harfli ekler
+        "de", "da", "te", "ta",
+        "in", "ın", "ün", "un",
+        "im", "ım", "üm", "um",
+        "le", "la",
+        "ce", "ca", "çe", "ça",
+        "ye", "ya", "ne", "na",
+        "dı", "di", "du", "dü",
+        "tı", "ti", "tu", "tü",
+        "mı", "mi", "mu", "mü",
+        // 1 harfli ekler (sadece belirli durumlar)
+        "e", "a", "i", "ı",
+    ];
+
+    for suffix in suffixes {
+        if lower.ends_with(suffix) {
+            let stem_len = lower.len() - suffix.len();
+            // Govde en az 2 karakter olmali
+            if stem_len >= 2 {
+                let stem = &lower[..stem_len];
+                // UTF-8 guvenli boundary kontrolu
+                if lower.is_char_boundary(stem_len) {
+                    return (stem.to_string(), suffix.to_string());
+                }
+            }
+        }
+    }
+
+    (lower, String::new())
+}
+
+// ── Fonetik benzerlik duzeltmeleri ──
+
+/// Sessiz konusmada Web Speech API'nin sik karistirdigi ses benzerlikleri.
+/// Bu duzeltmeler sadece Turkce icin gecerlidir.
+/// Not: Her iki yon (yanlis -> dogru) icin ayri kayit gerekir.
+fn apply_phonetic_fuzzy_corrections(text: &str) -> String {
+    let mut result = text.to_string();
+
+    // Web Speech'in sessiz konusmada sik karistirdigi kelime cifrleri
+    // Bu liste kullanicinin bildirdigi ve yaygin gozlemlenen hatalardan olusur.
+    // Tek yonlu: ilk deger Web Speech'in urettigi yanlis, ikincisi dogru kelime.
+    //
+    // Kriterler:
+    // 1. Her iki kelime de gecerli Turkce ama biri cok daha yaygin kullanilir
+    // 2. Fonetik olarak cok yakin (1-2 ses farki)
+    // 3. Web Speech API'nin sessiz konusmada sistematik olarak karistirdigi cifter
+    let phonetic_corrections: &[(&str, &str)] = &[
+        // ç ↔ t karisikliklari (her ikisi de titreşimsiz, sessiz konusmada yakin)
+        ("biçim", "bitim"),       // bitim (son, bitis) daha yaygin kullanilir konusmada
+
+        // Yaygin ses benzerlik karisikliklari
+        ("felan", "falan"),       // "falan" dogru Turkce
+        ("felen", "falan"),
+        ("bişey", "bir şey"),     // konusma dilinde sik karisir
+        ("birşey", "bir şey"),
+        ("bişi", "bir şey"),
+        ("herşey", "her şey"),
+        ("hiçbişey", "hiçbir şey"),
+
+        // Sessiz konusmada yutulan heceler
+        ("yapıyom", "yapıyorum"),
+        ("ediyom", "ediyorum"),
+        ("geliyom", "geliyorum"),
+        ("gidiyom", "gidiyorum"),
+        ("biliyom", "biliyorum"),
+        ("istiyom", "istiyorum"),
+        ("diyom", "diyorum"),
+        ("bakıyom", "bakıyorum"),
+        ("anlıyom", "anlıyorum"),
+        ("çalışıyom", "çalışıyorum"),
+        ("söylüyom", "söylüyorum"),
+        ("görüyom", "görüyorum"),
+        ("oluyom", "oluyorum"),
+        ("alıyom", "alıyorum"),
+        ("veriyom", "veriyorum"),
+        ("seviyom", "seviyorum"),
+        ("sanıyom", "sanıyorum"),
+        ("düşünüyom", "düşünüyorum"),
+        ("bekliyom", "bekliyorum"),
+        ("deniyom", "deniyorum"),
+        ("okuyom", "okuyorum"),
+        ("yazıyom", "yazıyorum"),
+        ("konuşuyom", "konuşuyorum"),
+
+        // -yor → -yo kısaltması (sessiz konusmada sik)
+        ("yapıyo", "yapıyor"),
+        ("ediyo", "ediyor"),
+        ("geliyo", "geliyor"),
+        ("gidiyo", "gidiyor"),
+        ("biliyo", "biliyor"),
+        ("istiyo", "istiyor"),
+        ("diyo", "diyor"),
+        ("bakıyo", "bakıyor"),
+        ("anlıyo", "anlıyor"),
+        ("çalışıyo", "çalışıyor"),
+        ("oluyo", "oluyor"),
+        ("görüyo", "görüyor"),
+
+        // Sik konusma kısaltmalari
+        ("naber", "ne haber"),
+        ("napıyorsun", "ne yapıyorsun"),
+        ("napıyon", "ne yapıyorsun"),
+        ("noluyo", "ne oluyor"),
+        ("noldu", "ne oldu"),
+        ("nabıyosun", "ne yapıyorsun"),
+        ("napcaz", "ne yapacağız"),
+        ("napalım", "ne yapalım"),
+
+        // d ↔ t karisikliklari (sessiz/titresimli cift)
+        ("ded", "dedi"),          // sondaki hece yutulur
+        ("geld", "geldi"),
+
+        // Agiz aliskanliklari / konusma dili
+        ("yaa", "ya"),
+        ("eee", "ee"),
+        ("şeey", "şey"),
+        ("ııı", ""),              // dolgu sesi — kaldir
+        ("hmm", ""),              // dolgu sesi
+        ("ıhı", ""),
+        ("hıhı", ""),
+        // Ek fonetik kaliplar — gelecek zaman kisaltmalari
+        ("bilmiyom", "bilmiyorum"),
+        ("istemiyom", "istemiyorum"),
+        ("görmüyom", "görmüyorum"),
+        ("gelcem", "geleceğim"),
+        ("gidcem", "gideceğim"),
+        ("yapçam", "yapacağım"),
+        ("olcak", "olacak"),
+        ("gelcek", "gelecek"),
+        ("yapcaz", "yapacağız"),
+        ("gidilcek", "gidilecek"),
+        ("alıcam", "alacağım"),
+        ("vericem", "vereceğim"),
+        ("gidicem", "gideceğim"),
+        ("başlıcak", "başlayacak"),
+        ("çalışıcam", "çalışacağım"),
+    ];
+
+    for (wrong, correct) in phonetic_corrections {
+        if is_english_loanword(wrong) {
+            continue;
+        }
+        result = replace_whole_word(&result, wrong, correct);
+    }
+
+    // Boslukla ayrilan dolgu seslerini temizle
+    result = result.replace("  ", " ");
+    result.trim().to_string()
+}
+
+// ── Ek-farkindalikli kullanici duzeltmeleri ──
+
+/// Kullanici duzeltme sozlugunu ek-farkindalikli olarak uygula.
+/// Ornek: sozlukte "biçim" → "bitim" varsa, "biçimleri" → "bitimleri" olur.
+fn apply_suffix_aware_user_corrections(
+    text: &str,
+    corrections: &std::collections::HashMap<String, String>,
+) -> String {
+    if corrections.is_empty() {
+        return text.to_string();
+    }
+
+    // Oncelikle tam kelime eslesmesi dene (mevcut davranis)
+    let result = crate::corrections::apply_user_corrections(text, corrections);
+
+    // Simdi ek-farkindalikli esleme: her kelimeyi kontrol et
+    let words: Vec<&str> = result.split_whitespace().collect();
+    let mut new_words: Vec<String> = Vec::with_capacity(words.len());
+    let mut changed = false;
+
+    for word in &words {
+        let lower = word.to_lowercase();
+
+        // Zaten tam eslesen var mi? (apply_user_corrections yapmis olabilir)
+        if corrections.contains_key(&lower) {
+            new_words.push(word.to_string());
+            continue;
+        }
+
+        // Ekleri soy, govdeyi kontrol et
+        let (stem, suffix) = strip_turkish_suffixes(&lower);
+        if !suffix.is_empty() {
+            if let Some(corrected_stem) = corrections.get(&stem) {
+                // Govde eslesti — duzeltilmis govde + orijinal ek
+                let mut corrected = corrected_stem.clone();
+                corrected.push_str(&suffix);
+
+                // Buyuk harf koruma
+                if word.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    let mut chars = corrected.chars();
+                    let mut new_word = String::new();
+                    if let Some(first) = chars.next() {
+                        new_word.push(first.to_uppercase().next().unwrap_or(first));
+                        new_word.extend(chars);
+                    }
+                    new_words.push(new_word);
+                } else {
+                    new_words.push(corrected);
+                }
+                changed = true;
+                continue;
+            }
+        }
+
+        new_words.push(word.to_string());
+    }
+
+    if changed {
+        new_words.join(" ")
+    } else {
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,7 +1527,9 @@ mod tests {
     #[test]
     fn test_detect_repetition() {
         assert!(detect_repetition("alo alo alo alo"));
-        assert!(detect_repetition("bir iki bir iki bir iki"));
+        assert!(detect_repetition("bir iki bir iki bir iki bir iki")); // 8 kelime, 2 benzersiz
+        assert!(!detect_repetition("hayır hayır hayır")); // 3 kelime — gercek konusma
+        assert!(!detect_repetition("bir iki bir iki bir iki")); // 6 kelime — sinir alti
         assert!(!detect_repetition("bugün hava çok güzel"));
     }
 
@@ -1477,5 +1778,75 @@ mod tests {
         let result = process_text("10un üstünde konuştuk", "tr", false, false, None);
         assert!(result.contains("onun") || result.contains("Onun"),
             "10un -> onun olmali: {}", result);
+    }
+
+    // ── Ek soyma testleri ──
+
+    #[test]
+    fn test_strip_turkish_suffixes() {
+        assert_eq!(strip_turkish_suffixes("biçimleri"), ("biçim".to_string(), "leri".to_string()));
+        assert_eq!(strip_turkish_suffixes("evlerinden"), ("ev".to_string(), "lerinden".to_string()));
+        assert_eq!(strip_turkish_suffixes("güzel"), ("güzel".to_string(), "".to_string())); // ek yok
+        assert_eq!(strip_turkish_suffixes("ön"), ("ön".to_string(), "".to_string())); // cok kisa
+    }
+
+    // ── Fonetik duzeltme testleri ──
+
+    #[test]
+    fn test_phonetic_corrections_konusma() {
+        let result = apply_phonetic_fuzzy_corrections("yapıyom bir şey");
+        assert!(result.contains("yapıyorum"), "yapıyom -> yapıyorum olmali: {}", result);
+    }
+
+    #[test]
+    fn test_phonetic_corrections_falan() {
+        let result = apply_phonetic_fuzzy_corrections("felan öyle dedi");
+        assert!(result.contains("falan"), "felan -> falan olmali: {}", result);
+    }
+
+    #[test]
+    fn test_phonetic_corrections_birsey() {
+        let result = apply_phonetic_fuzzy_corrections("bişey yapıyom");
+        assert!(result.contains("bir şey"), "bişey -> bir şey olmali: {}", result);
+    }
+
+    #[test]
+    fn test_phonetic_corrections_yor_kisaltma() {
+        let result = apply_phonetic_fuzzy_corrections("geliyo musun");
+        assert!(result.contains("geliyor"), "geliyo -> geliyor olmali: {}", result);
+    }
+
+    // ── Ek-farkindalikli kullanici duzeltme testleri ──
+
+    #[test]
+    fn test_suffix_aware_corrections() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("biçim".to_string(), "bitim".to_string());
+
+        // Tam esleme
+        let result = apply_suffix_aware_user_corrections("bu biçim doğru", &map);
+        assert!(result.contains("bitim"), "biçim -> bitim olmali: {}", result);
+
+        // Ekli esleme
+        let result2 = apply_suffix_aware_user_corrections("biçimleri güzel", &map);
+        assert!(result2.contains("bitimleri"), "biçimleri -> bitimleri olmali: {}", result2);
+    }
+
+    #[test]
+    fn test_suffix_aware_no_false_positive() {
+        let map = std::collections::HashMap::new();
+        // Bos sozlukle degisiklik olmamalı
+        let result = apply_suffix_aware_user_corrections("merhaba dünya", &map);
+        assert_eq!(result, "merhaba dünya");
+    }
+
+    #[test]
+    fn test_allowed_repetition_whitelist() {
+        // "evet evet evet evet" mesru tekrar — filtrelenMEmeli
+        assert!(!detect_repetition("evet evet evet evet"));
+        assert!(!detect_repetition("tamam tamam tamam tamam"));
+        assert!(!detect_repetition("hayır hayır hayır hayır"));
+        // Ama rastgele tekrar hala filtrelenmeli
+        assert!(detect_repetition("xyz xyz xyz xyz"));
     }
 }

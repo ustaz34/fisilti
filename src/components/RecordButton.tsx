@@ -38,7 +38,7 @@ export function RecordButton() {
               text: result.text,
               timestamp: Date.now(),
               durationMs: result.duration_ms,
-              engine: settings.transcriptionEngine as "web" | "whisper",
+              engine: settings.transcriptionEngine as "web" | "whisper" | "deepgram" | "azure" | "google-cloud",
               language: settings.language,
               modelId: settings.transcriptionEngine === "web" ? "web-speech" : settings.selectedModel,
             });

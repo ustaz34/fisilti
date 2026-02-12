@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+const MAX_PROMPT_LENGTH: usize = 500;
+
 // ─── Veri Yapilari ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,11 +23,21 @@ pub struct UserCorrection {
     pub right: String,
     pub count: u32,
     pub last_seen: u64,
+    #[serde(default)]
+    pub revert_count: u32,
+    #[serde(default)]
+    pub status: CorrectionStatus,
+    #[serde(default)]
+    pub first_seen: u64,
+    #[serde(default)]
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CorrectionStore {
     pub corrections: Vec<UserCorrection>,
+    #[serde(default)]
+    pub version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -40,6 +52,20 @@ pub enum Domain {
 impl Default for Domain {
     fn default() -> Self {
         Domain::General
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum CorrectionStatus {
+    Pending,
+    Confirmed,
+    Active,
+    Deprecated,
+}
+
+impl Default for CorrectionStatus {
+    fn default() -> Self {
+        CorrectionStatus::Pending
     }
 }
 
@@ -125,9 +151,30 @@ pub fn load_corrections(app_handle: &tauri::AppHandle) {
     let path = corrections_path(app_handle);
     if path.exists() {
         if let Ok(data) = std::fs::read_to_string(&path) {
-            if let Ok(store) = serde_json::from_str::<CorrectionStore>(&data) {
+            if let Ok(mut store) = serde_json::from_str::<CorrectionStore>(&data) {
+                // Migration: v1 -> v2
+                if store.version < 2 {
+                    for c in &mut store.corrections {
+                        if c.first_seen == 0 {
+                            c.first_seen = c.last_seen;
+                        }
+                        if c.source.is_empty() {
+                            c.source = "diff".to_string();
+                        }
+                        if c.status == CorrectionStatus::Pending {
+                            if c.count >= 3 {
+                                c.status = CorrectionStatus::Active;
+                            } else if c.count >= 1 {
+                                c.status = CorrectionStatus::Confirmed;
+                            }
+                        }
+                    }
+                    store.version = 2;
+                    log::info!("Duzeltme sozlugu v1 -> v2 goc tamamlandi");
+                }
+                let count = store.corrections.len();
                 *get_correction_store().write() = store;
-                log::info!("Duzeltme sozlugu yuklendi: {} kayit", get_correction_store().read().corrections.len());
+                log::info!("Duzeltme sozlugu yuklendi: {} kayit", count);
                 return;
             }
         }
@@ -209,12 +256,20 @@ pub fn add_correction(wrong: &str, right: &str) {
         existing.right = right.to_string();
         existing.count += 1;
         existing.last_seen = now;
+        // Status guncelle
+        if existing.count >= MIN_CONFIRMATIONS && existing.status == CorrectionStatus::Pending {
+            existing.status = CorrectionStatus::Confirmed;
+        }
     } else {
         store.corrections.push(UserCorrection {
             wrong: wrong.to_lowercase(),
             right: right.to_string(),
             count: 1,
             last_seen: now,
+            revert_count: 0,
+            status: CorrectionStatus::Pending,
+            first_seen: now,
+            source: "diff".to_string(),
         });
     }
 }
@@ -233,7 +288,7 @@ pub fn get_all_corrections() -> Vec<UserCorrection> {
     get_correction_store().read().corrections.clone()
 }
 
-/// Aktif duzeltme haritasi (1+ tekrar olanlar, self-correction filtrelenir)
+/// Aktif duzeltme haritasi (sadece Active + confidence >= 0.5)
 pub fn get_corrections_map() -> HashMap<String, String> {
     let store = get_correction_store().read();
     let mut map = HashMap::new();
@@ -241,7 +296,8 @@ pub fn get_corrections_map() -> HashMap<String, String> {
         if c.wrong.to_lowercase() == c.right.to_lowercase() {
             continue; // Self-correction gurultu
         }
-        if c.count >= 1 {
+        // Sadece Active duzeltmeleri uygula (confidence >= 0.5)
+        if c.status == CorrectionStatus::Active && calculate_confidence(c) >= AUTO_APPLY_CONFIDENCE {
             map.insert(c.wrong.clone(), c.right.clone());
         }
     }
@@ -258,6 +314,161 @@ pub fn get_all_corrections_map() -> HashMap<String, String> {
     map
 }
 
+// ─── Guven Skoru Motoru ───
+
+/// Guven skoru hesapla: confidence = max(0, count - revert_count*2) * exp(-0.01 * gun_sayisi)
+pub fn calculate_confidence(correction: &UserCorrection) -> f64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let days_since = if correction.last_seen > 0 {
+        (now.saturating_sub(correction.last_seen)) as f64 / (1000.0 * 60.0 * 60.0 * 24.0)
+    } else {
+        0.0
+    };
+    let effective_count = (correction.count as i64 - correction.revert_count as i64 * 2).max(0) as f64;
+    effective_count * (-0.01 * days_since).exp()
+}
+
+const MIN_CONFIRMATIONS: u32 = 3;
+const AUTO_APPLY_CONFIDENCE: f64 = 0.5;
+const DEPRECATION_THRESHOLD: f64 = 0.1;
+
+/// Tum duzeltmelerin durumlarini yeniden hesapla
+pub fn recalculate_all_statuses() {
+    let mut store = get_correction_store().write();
+    for c in &mut store.corrections {
+        let conf = calculate_confidence(c);
+        match c.status {
+            CorrectionStatus::Pending => {
+                if c.count >= MIN_CONFIRMATIONS || c.source == "manual" {
+                    c.status = CorrectionStatus::Confirmed;
+                }
+            }
+            CorrectionStatus::Confirmed => {
+                if conf >= AUTO_APPLY_CONFIDENCE {
+                    c.status = CorrectionStatus::Active;
+                } else if conf < DEPRECATION_THRESHOLD && c.count > 0 {
+                    c.status = CorrectionStatus::Deprecated;
+                }
+            }
+            CorrectionStatus::Active => {
+                if conf < AUTO_APPLY_CONFIDENCE {
+                    if conf < DEPRECATION_THRESHOLD {
+                        c.status = CorrectionStatus::Deprecated;
+                    } else {
+                        c.status = CorrectionStatus::Confirmed;
+                    }
+                }
+            }
+            CorrectionStatus::Deprecated => {
+                // 90 gun sonra otomatik sil (periyodik bakim'da yapilacak)
+            }
+        }
+    }
+}
+
+/// Negatif geri bildirim: kullanici pipeline duzeltmesini geri aldi
+pub fn report_correction_revert(wrong: &str, right: &str) {
+    let mut store = get_correction_store().write();
+    let lower_wrong = wrong.to_lowercase();
+    if let Some(c) = store.corrections.iter_mut().find(|c| c.wrong.to_lowercase() == lower_wrong && c.right.to_lowercase() == right.to_lowercase()) {
+        c.revert_count += 1;
+        log::info!("Duzeltme geri alindi: {} -> {} (revert_count: {})", wrong, right, c.revert_count);
+    }
+}
+
+/// Duzeltmeyi yukselt (Pending/Confirmed -> Active)
+pub fn promote_correction(wrong: &str) {
+    let mut store = get_correction_store().write();
+    let lower_wrong = wrong.to_lowercase();
+    if let Some(c) = store.corrections.iter_mut().find(|c| c.wrong.to_lowercase() == lower_wrong) {
+        match c.status {
+            CorrectionStatus::Pending | CorrectionStatus::Confirmed => {
+                c.status = CorrectionStatus::Active;
+                c.source = "manual".to_string();
+                log::info!("Duzeltme yukseltildi: {} -> Active", wrong);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Duzeltmeyi dusur (Active -> Deprecated)
+pub fn demote_correction(wrong: &str) {
+    let mut store = get_correction_store().write();
+    let lower_wrong = wrong.to_lowercase();
+    if let Some(c) = store.corrections.iter_mut().find(|c| c.wrong.to_lowercase() == lower_wrong) {
+        c.status = CorrectionStatus::Deprecated;
+        log::info!("Duzeltme dusuruldu: {} -> Deprecated", wrong);
+    }
+}
+
+/// Govde cikarimli duzeltme ekle (daha fazla onay gerektirir)
+pub fn add_stem_correction(wrong: &str, right: &str) {
+    let mut store = get_correction_store().write();
+    let lower_wrong = wrong.to_lowercase();
+    let lower_right = right.to_lowercase();
+
+    if lower_wrong == lower_right {
+        return;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    if let Some(existing) = store.corrections.iter_mut().find(|c| c.wrong.to_lowercase() == lower_wrong) {
+        existing.count += 1;
+        existing.last_seen = now;
+    } else {
+        store.corrections.push(UserCorrection {
+            wrong: wrong.to_lowercase(),
+            right: right.to_string(),
+            count: 0, // count: 0 — daha fazla onay gerektirir
+            last_seen: now,
+            revert_count: 0,
+            status: CorrectionStatus::Pending,
+            first_seen: now,
+            source: "stem_inferred".to_string(),
+        });
+    }
+}
+
+/// Periyodik bakim: 90+ gun Deprecated olan duzeltmeleri sil
+pub fn cleanup_deprecated() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let ninety_days_ms: u64 = 90 * 24 * 60 * 60 * 1000;
+
+    let mut store = get_correction_store().write();
+    store.corrections.retain(|c| {
+        if c.status == CorrectionStatus::Deprecated {
+            let age = now.saturating_sub(c.last_seen);
+            if age > ninety_days_ms {
+                log::info!("Deprecated duzeltme silindi: {} -> {}", c.wrong, c.right);
+                return false;
+            }
+        }
+        true
+    });
+}
+
+/// Her N transkripsiyonda bir tam bakim yap
+pub fn periodic_maintenance() {
+    let profile = get_user_profile().read();
+    if profile.total_transcriptions % 100 == 0 && profile.total_transcriptions > 0 {
+        drop(profile); // Read lock'u birak
+        recalculate_all_statuses();
+        cleanup_deprecated();
+        log::info!("Periyodik bakim tamamlandi (transkripsiyon #{})", get_user_profile().read().total_transcriptions);
+    }
+}
+
 // ─── Katman 1: Kullanici Duzeltmeleri Uygulama ───
 
 /// Metne kullanici duzeltmelerini uygula (tam kelime eslesmesi)
@@ -266,8 +477,12 @@ pub fn apply_user_corrections(text: &str, corrections: &HashMap<String, String>)
         return text.to_string();
     }
 
+    // Key uzunluguna gore azalan sirala — uzun eslesmeler once, deterministik
+    let mut sorted: Vec<(&String, &String)> = corrections.iter().collect();
+    sorted.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(b.0)));
+
     let mut result = text.to_string();
-    for (wrong, right) in corrections {
+    for (wrong, right) in sorted {
         result = replace_whole_word_unicode(&result, wrong, right);
     }
     result
@@ -318,23 +533,48 @@ fn replace_whole_word_unicode(text: &str, word: &str, replacement: &str) -> Stri
 
 /// Iki metin arasindaki kelime bazli farklari bul ve duzeltmeleri ogren.
 /// Levenshtein mesafesi <= 2 olan degisiklikler "duzeltme" olarak sayilir.
-pub fn learn_from_diff(original: &str, edited: &str) -> Vec<(String, String)> {
+/// Ek olarak: ekli kelimeler icin govde duzeltmesi de ogrenir.
+/// Ornek: "biçimleri" → "bitimleri" duzeltmesinden "biçim" → "bitim" ogrenir.
+/// Dondurur: (dogrudan_duzeltmeler, govde_cikarimli_duzeltmeler)
+pub fn learn_from_diff(original: &str, edited: &str) -> (Vec<(String, String)>, Vec<(String, String)>) {
     let orig_words: Vec<&str> = original.split_whitespace().collect();
     let edit_words: Vec<&str> = edited.split_whitespace().collect();
 
     let mut learned = Vec::new();
+    let mut stem_inferred = Vec::new();
+
+    let process_pair = |ol: &str, el: &str, learned: &mut Vec<(String, String)>, stem_inferred: &mut Vec<(String, String)>| {
+        if ol == el || ol.len() < 3 || is_turkish_stopword(ol) || is_turkish_stopword(el) {
+            return;
+        }
+        let dist = levenshtein(ol, el);
+        if dist > 0 && dist <= 2 {
+            learned.push((ol.to_string(), el.to_string()));
+        }
+
+        // Ek-farkindalikli ogrenme: ortak eki soy, govdeleri karsilastir
+        // Boylece "biçimleri" → "bitimleri" = "biçim" → "bitim" ogrenir
+        let (o_stem, o_suffix) = crate::text::strip_turkish_suffixes_pub(ol);
+        let (e_stem, e_suffix) = crate::text::strip_turkish_suffixes_pub(el);
+
+        // Ayni eke sahiplerse VE govdeler farkliysa → govde duzeltmesi ogren
+        if !o_suffix.is_empty() && o_suffix == e_suffix && o_stem != e_stem {
+            let stem_dist = levenshtein(&o_stem, &e_stem);
+            if stem_dist > 0 && stem_dist <= 2 && o_stem.len() >= 3 {
+                // Govde cikarimi — daha fazla onay gerektirir (stem_inferred)
+                if !learned.iter().any(|(w, _)| w == &o_stem) && !stem_inferred.iter().any(|(w, _)| w == &o_stem) {
+                    stem_inferred.push((o_stem, e_stem));
+                }
+            }
+        }
+    };
 
     // Basit hizalama: ayni uzunlukta ise birebir karsilastir
     if orig_words.len() == edit_words.len() {
         for (o, e) in orig_words.iter().zip(edit_words.iter()) {
             let ol = o.to_lowercase();
             let el = e.to_lowercase();
-            if ol != el && ol.len() >= 3 && !is_turkish_stopword(&ol) && !is_turkish_stopword(&el) {
-                let dist = levenshtein(&ol, &el);
-                if dist <= 2 && dist > 0 {
-                    learned.push((ol, e.to_string()));
-                }
-            }
+            process_pair(&ol, &el, &mut learned, &mut stem_inferred);
         }
     } else {
         // Farkli uzunlukta: LCS tabanli hizalama
@@ -343,17 +583,12 @@ pub fn learn_from_diff(original: &str, edited: &str) -> Vec<(String, String)> {
             if let (Some(orig_w), Some(edit_w)) = (o, e) {
                 let ol = orig_w.to_lowercase();
                 let el = edit_w.to_lowercase();
-                if ol != el && ol.len() >= 3 && !is_turkish_stopword(&ol) && !is_turkish_stopword(&el) {
-                    let dist = levenshtein(&ol, &el);
-                    if dist <= 2 && dist > 0 {
-                        learned.push((ol, edit_w.to_string()));
-                    }
-                }
+                process_pair(&ol, &el, &mut learned, &mut stem_inferred);
             }
         }
     }
 
-    learned
+    (learned, stem_inferred)
 }
 
 /// Public Levenshtein mesafesi hesaplama (text.rs'den erisim icin)
@@ -428,25 +663,40 @@ fn align_words<'a>(orig: &[&'a str], edit: &[&'a str]) -> Vec<(Option<String>, O
 // ─── Katman 3: Alan Tespiti ───
 
 pub fn detect_domain(history_texts: &[String]) -> Domain {
-    let combined: String = history_texts.iter().take(100).cloned().collect::<Vec<_>>().join(" ").to_lowercase();
+    use std::collections::HashSet;
 
-    let tech_keywords = ["api", "server", "deploy", "bug", "commit", "frontend", "backend",
-        "database", "kod", "yazilim", "program", "fonksiyon", "degisken", "class", "git"];
-    let medical_keywords = ["hasta", "tedavi", "ilac", "doktor", "ameliyat", "teshis",
-        "recete", "hastane", "klinik", "semptom", "muayene", "tansi"];
-    let legal_keywords = ["mahkeme", "dava", "avukat", "kanun", "hukuk", "savci",
-        "hakim", "sozlesme", "madde", "ihlal", "karar", "temyiz"];
-    let business_keywords = ["toplanti", "proje", "rapor", "musteri", "satis",
-        "pazarlama", "butce", "strateji", "hedef", "performans", "yonetim"];
+    static TECH_KEYWORDS: &[&str] = &["api", "server", "deploy", "bug", "commit", "frontend", "backend",
+        "database", "kod", "yazılım", "program", "fonksiyon", "değişken", "class", "git"];
+    static MEDICAL_KEYWORDS: &[&str] = &["hasta", "tedavi", "ilaç", "doktor", "ameliyat", "teşhis",
+        "reçete", "hastane", "klinik", "semptom", "muayene", "tansiyon"];
+    static LEGAL_KEYWORDS: &[&str] = &["mahkeme", "dava", "avukat", "kanun", "hukuk", "savcı",
+        "hakim", "sözleşme", "madde", "ihlal", "karar", "temyiz"];
+    static BUSINESS_KEYWORDS: &[&str] = &["toplantı", "proje", "rapor", "müşteri", "satış",
+        "pazarlama", "bütçe", "strateji", "hedef", "performans", "yönetim"];
 
-    let tech_score: usize = tech_keywords.iter().filter(|k| combined.contains(*k)).count();
-    let medical_score: usize = medical_keywords.iter().filter(|k| combined.contains(*k)).count();
-    let legal_score: usize = legal_keywords.iter().filter(|k| combined.contains(*k)).count();
-    let business_score: usize = business_keywords.iter().filter(|k| combined.contains(*k)).count();
+    let mut tech_score: f64 = 0.0;
+    let mut medical_score: f64 = 0.0;
+    let mut legal_score: f64 = 0.0;
+    let mut business_score: f64 = 0.0;
+
+    for (i, text) in history_texts.iter().take(100).enumerate() {
+        // Temporal weighting: son 10 → 3x, son 30 → 2x, geri kalan → 1x
+        let weight = if i < 10 { 3.0 } else if i < 30 { 2.0 } else { 1.0 };
+
+        let words: HashSet<String> = text.to_lowercase()
+            .split_whitespace()
+            .map(|w| w.to_string())
+            .collect();
+
+        tech_score += TECH_KEYWORDS.iter().filter(|k| words.contains(**k)).count() as f64 * weight;
+        medical_score += MEDICAL_KEYWORDS.iter().filter(|k| words.contains(**k)).count() as f64 * weight;
+        legal_score += LEGAL_KEYWORDS.iter().filter(|k| words.contains(**k)).count() as f64 * weight;
+        business_score += BUSINESS_KEYWORDS.iter().filter(|k| words.contains(**k)).count() as f64 * weight;
+    }
 
     let max_score = tech_score.max(medical_score).max(legal_score).max(business_score);
 
-    if max_score < 3 {
+    if max_score < 5.0 {
         return Domain::General;
     }
 
@@ -539,9 +789,9 @@ pub fn update_frequent_words(text: &str) {
 pub fn build_dynamic_prompt(language: &str) -> String {
     let profile = get_user_profile().read();
 
-    // Katman 1: Dil bazli temel prompt
+    // Katman 1: Dil bazli temel prompt (Turkce fonem kapsamini genislet)
     let base = match language {
-        "tr" => "Merhaba, bugün hava çok güzel. Nasılsınız? İstanbul çok kalabalık bir şehir.",
+        "tr" => "Merhaba, bugün hava çok güzel. Nasılsınız? İstanbul çok kalabalık bir şehir. Şirketin toplantısında bütçeyi görüştük. Çocuklar okula gidiyor. Öğretmen ödevleri kontrol etti. Müşteri memnuniyeti çok önemli. Türkiye'de yaşıyorum.",
         "en" => "Hello, how are you today? I'm doing well, thank you.",
         "de" => "Hallo, wie geht es Ihnen? Mir geht es gut, danke.",
         "fr" => "Bonjour, comment allez-vous? Je vais bien, merci.",
@@ -568,7 +818,7 @@ pub fn build_dynamic_prompt(language: &str) -> String {
     prompt.push_str(domain_addition);
 
     // Katman 3: Kullanici sik kelimeleri + n-gram'lar
-    let remaining = 300_usize.saturating_sub(prompt.len());
+    let remaining = MAX_PROMPT_LENGTH.saturating_sub(prompt.len());
     if remaining > 20 {
         let mut user_terms = String::new();
 
@@ -605,12 +855,15 @@ pub fn build_dynamic_prompt(language: &str) -> String {
         }
     }
 
-    // Max 300 karakter siniri
-    if prompt.len() > 300 {
-        // UTF-8 guvenli truncate
-        let mut end = 300;
+    // Max 500 karakter siniri (Turkce morfoloji icin daha genis prompt gerekir)
+    if prompt.len() > MAX_PROMPT_LENGTH {
+        // UTF-8 guvenli truncate — cumle sinirinda kes
+        let mut end = MAX_PROMPT_LENGTH;
         while !prompt.is_char_boundary(end) && end > 0 {
             end -= 1;
+        }
+        if let Some(last_period) = prompt[..end].rfind(". ") {
+            end = last_period + 1;
         }
         prompt.truncate(end);
     }
@@ -669,7 +922,7 @@ pub fn get_dynamic_prompt_preview(language: &str) -> DynamicPromptPreview {
 
     // Katman 3: Kullanici sik kelimeleri + n-gram'lar
     let total_base = base_prompt.len() + domain_addition.len();
-    let remaining = 300_usize.saturating_sub(total_base);
+    let remaining = MAX_PROMPT_LENGTH.saturating_sub(total_base);
     let mut user_terms = String::new();
 
     if remaining > 20 {
@@ -697,8 +950,8 @@ pub fn get_dynamic_prompt_preview(language: &str) -> DynamicPromptPreview {
         base_prompt,
         domain_addition,
         user_terms,
-        total_length: total_length.min(300),
-        max_length: 300,
+        total_length: total_length.min(MAX_PROMPT_LENGTH),
+        max_length: MAX_PROMPT_LENGTH,
     }
 }
 
@@ -774,7 +1027,7 @@ mod tests {
 
     #[test]
     fn test_learn_from_diff() {
-        let pairs = learn_from_diff("cok guzel bir gun", "çok güzel bir gün");
+        let (pairs, _stem_pairs) = learn_from_diff("cok guzel bir gun", "çok güzel bir gün");
         assert!(!pairs.is_empty());
         // "cok" is a stopword, should NOT be learned
         assert!(!pairs.iter().any(|(w, _)| w == "cok"), "stopword 'cok' should be filtered");
@@ -785,7 +1038,7 @@ mod tests {
     #[test]
     fn test_learn_from_diff_stopword_filter() {
         // Stop-word'ler ogrenilmemeli
-        let pairs = learn_from_diff("ve ben bir ile", "vee benn birr ilee");
+        let (pairs, _stem_pairs) = learn_from_diff("ve ben bir ile", "vee benn birr ilee");
         assert!(pairs.is_empty(), "stopword pairs should be filtered: {:?}", pairs);
     }
 
@@ -818,10 +1071,10 @@ mod tests {
 
     #[test]
     fn test_detect_domain() {
-        let tech = vec!["API server deploy bug commit frontend backend".to_string()];
+        let tech = vec!["api server deploy bug commit frontend backend database".to_string()];
         assert_eq!(detect_domain(&tech), Domain::Technical);
 
-        let medical = vec!["hasta tedavi ilac doktor ameliyat teshis".to_string()];
+        let medical = vec!["hasta tedavi ilaç doktor ameliyat teşhis reçete hastane klinik".to_string()];
         assert_eq!(detect_domain(&medical), Domain::Medical);
 
         let general = vec!["bugün hava güzel".to_string()];

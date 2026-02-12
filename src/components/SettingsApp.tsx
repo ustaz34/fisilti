@@ -7,16 +7,18 @@ import { ModelManager } from "./ModelManager";
 import { LearningPanel } from "./LearningPanel";
 import { HistoryPanel } from "./HistoryPanel";
 import { ColorsPanel } from "./ColorsPanel";
+import { CloudEnginesPanel } from "./CloudEnginesPanel";
 import { useSettingsStore, type AppSettings } from "../stores/settingsStore";
 import { useTranscriptionStore } from "../stores/transcriptionStore";
 import { useRecordingStore } from "../stores/recordingStore";
 import { getSettings } from "../lib/tauri-commands";
 import { listen } from "@tauri-apps/api/event";
 
-type Tab = "general" | "models" | "stats" | "learning" | "history" | "colors" | "about";
+type Tab = "general" | "cloud" | "models" | "stats" | "learning" | "history" | "colors" | "about";
 
 const TAB_TITLES: Record<Tab, string> = {
   general: "Genel Ayarlar",
+  cloud: "Bulut Motorlari",
   models: "Modeller",
   stats: "Istatistikler",
   learning: "Ogrenme",
@@ -55,7 +57,11 @@ export function SettingsApp() {
           vadThreshold: saved.vad_threshold,
           autoPaste: saved.auto_paste,
           language: saved.language,
-          transcriptionEngine: (saved.transcription_engine as "whisper" | "web") || "web",
+          transcriptionEngine: (saved.transcription_engine as "whisper" | "web" | "deepgram" | "azure" | "google-cloud") || "web",
+          deepgramApiKey: saved.deepgram_api_key ?? "",
+          azureSpeechKey: saved.azure_speech_key ?? "",
+          azureSpeechRegion: saved.azure_speech_region ?? "",
+          googleCloudApiKey: saved.google_cloud_api_key ?? "",
           voiceActivation: saved.voice_activation ?? false,
           wakeWord: saved.wake_word ?? "fısıltı",
           soundEnabled: saved.sound_enabled ?? true,
@@ -112,7 +118,11 @@ export function SettingsApp() {
               vadThreshold: saved.vad_threshold,
               autoPaste: saved.auto_paste,
               language: saved.language,
-              transcriptionEngine: (saved.transcription_engine as "whisper" | "web") || "web",
+              transcriptionEngine: (saved.transcription_engine as "whisper" | "web" | "deepgram" | "azure" | "google-cloud") || "web",
+              deepgramApiKey: saved.deepgram_api_key ?? "",
+              azureSpeechKey: saved.azure_speech_key ?? "",
+              azureSpeechRegion: saved.azure_speech_region ?? "",
+              googleCloudApiKey: saved.google_cloud_api_key ?? "",
               voiceActivation: saved.voice_activation ?? false,
               wakeWord: saved.wake_word ?? "fısıltı",
               soundEnabled: saved.sound_enabled ?? true,
@@ -229,6 +239,12 @@ export function SettingsApp() {
             </svg>
           </NavButton>
 
+          <NavButton active={activeTab === "cloud"} label="Bulut" expanded={sidebarExpanded} onClick={() => setActiveTab("cloud")}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+            </svg>
+          </NavButton>
+
           <NavButton active={activeTab === "models"} label="Modeller" expanded={sidebarExpanded} onClick={() => setActiveTab("models")}>
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
@@ -313,6 +329,7 @@ export function SettingsApp() {
         {/* Sekme icerigi */}
         <div className="flex-1 overflow-y-auto scrollbar-thin">
           {activeTab === "general" && <GeneralTab />}
+          {activeTab === "cloud" && <CloudTab />}
           {activeTab === "models" && <ModelsTab />}
           {activeTab === "stats" && <StatsTab />}
           {activeTab === "learning" && <LearningTab />}
@@ -437,8 +454,10 @@ function StatusBar() {
               : "Hazir"}
         </span>
         <span className="text-[9px] text-[rgba(255,255,255,0.18)] font-mono">
-          {settings.transcriptionEngine === "web"
-            ? "Web Speech"
+          {settings.transcriptionEngine === "web" ? "Web Speech"
+            : settings.transcriptionEngine === "deepgram" ? "Deepgram Nova-3"
+            : settings.transcriptionEngine === "azure" ? "Azure Speech"
+            : settings.transcriptionEngine === "google-cloud" ? "Google Cloud"
             : settings.selectedModel || "Model secilmedi"}
         </span>
       </div>
@@ -458,6 +477,14 @@ function GeneralTab() {
   return (
     <div className="settings-content">
       <SettingsPanel />
+    </div>
+  );
+}
+
+function CloudTab() {
+  return (
+    <div className="settings-content">
+      <CloudEnginesPanel />
     </div>
   );
 }

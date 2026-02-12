@@ -9,7 +9,11 @@ export interface AppSettings {
   vadThreshold: number;
   autoPaste: boolean;
   language: string;
-  transcriptionEngine: "whisper" | "web";
+  transcriptionEngine: "whisper" | "web" | "deepgram" | "azure" | "google-cloud";
+  deepgramApiKey: string;
+  azureSpeechKey: string;
+  azureSpeechRegion: string;
+  googleCloudApiKey: string;
   voiceActivation: boolean;
   wakeWord: string;
   soundEnabled: boolean;
@@ -58,6 +62,10 @@ const defaultSettings: AppSettings = {
   autoPaste: true,
   language: "tr",
   transcriptionEngine: "web",
+  deepgramApiKey: "",
+  azureSpeechKey: "",
+  azureSpeechRegion: "",
+  googleCloudApiKey: "",
   voiceActivation: false,
   wakeWord: "fısıltı",
   soundEnabled: true,

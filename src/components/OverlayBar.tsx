@@ -42,7 +42,18 @@ export function OverlayBar() {
 
   // Win32 hit-test alanini guncelle: aktifken genis, idle'da kucuk
   useEffect(() => {
-    invoke("set_overlay_bar_active", { active: isRecording || isTranscribing }).catch(() => {});
+    const setActive = async (active: boolean, retries = 2) => {
+      for (let i = 0; i <= retries; i++) {
+        try {
+          await invoke("set_overlay_bar_active", { active });
+          return;
+        } catch (err) {
+          if (i === retries) console.error("set_overlay_bar_active failed:", err);
+          else await new Promise(r => setTimeout(r, 100));
+        }
+      }
+    };
+    setActive(isRecording || isTranscribing);
   }, [isRecording, isTranscribing]);
 
   const status: "idle" | "recording" | "transcribing" = isRecording

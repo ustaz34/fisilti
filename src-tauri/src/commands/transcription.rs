@@ -10,6 +10,7 @@ pub struct TranscriptionResponse {
     pub text: String,
     pub duration_ms: u64,
     pub status: String,
+    pub original_text: String,
 }
 
 #[tauri::command]
@@ -64,10 +65,14 @@ pub fn transcribe_audio(
         corrections::save_profile(&app_handle);
     }
 
+    // Periyodik bakim (her 100 transkripsiyonda)
+    corrections::periodic_maintenance();
+
     Ok(TranscriptionResponse {
         text: processed_text,
         duration_ms: result.duration_ms,
         status: "tamamlandi".to_string(),
+        original_text: result.text,
     })
 }
 

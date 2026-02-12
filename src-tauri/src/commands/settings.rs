@@ -34,6 +34,18 @@ pub fn get_settings(app_handle: tauri::AppHandle) -> AppSettings {
             let transcription_engine = store.get("transcription_engine")
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "web".to_string());
+            let deepgram_api_key = store.get("deepgram_api_key")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default();
+            let azure_speech_key = store.get("azure_speech_key")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default();
+            let azure_speech_region = store.get("azure_speech_region")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default();
+            let google_cloud_api_key = store.get("google_cloud_api_key")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default();
             let voice_activation = store.get("voice_activation")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
@@ -93,6 +105,10 @@ pub fn get_settings(app_handle: tauri::AppHandle) -> AppSettings {
                 auto_paste,
                 language,
                 transcription_engine,
+                deepgram_api_key,
+                azure_speech_key,
+                azure_speech_region,
+                google_cloud_api_key,
                 voice_activation,
                 wake_word,
                 sound_enabled,
@@ -129,6 +145,10 @@ pub fn save_settings(app_handle: tauri::AppHandle, settings: AppSettings) -> Res
     store.set("auto_paste", serde_json::json!(settings.auto_paste));
     store.set("language", serde_json::json!(settings.language));
     store.set("transcription_engine", serde_json::json!(settings.transcription_engine));
+    store.set("deepgram_api_key", serde_json::json!(settings.deepgram_api_key));
+    store.set("azure_speech_key", serde_json::json!(settings.azure_speech_key));
+    store.set("azure_speech_region", serde_json::json!(settings.azure_speech_region));
+    store.set("google_cloud_api_key", serde_json::json!(settings.google_cloud_api_key));
     store.set("voice_activation", serde_json::json!(settings.voice_activation));
     store.set("wake_word", serde_json::json!(settings.wake_word));
     store.set("sound_enabled", serde_json::json!(settings.sound_enabled));

@@ -87,10 +87,13 @@ pub fn start_recording(
                     return;
                 }
 
-                // Mono'ya donustur (ilk kanal)
+                // Mono'ya donustur (tum kanallarin ortalamasini al)
                 let mono: Vec<f32> = data
                     .chunks(channels)
-                    .map(|chunk| chunk[0])
+                    .map(|chunk| {
+                        let sum: f32 = chunk.iter().sum();
+                        sum / channels as f32
+                    })
                     .collect();
 
                 // Seviye hesapla (RMS)
@@ -129,12 +132,8 @@ pub fn stop_recording(state: &SharedAudioState) -> Result<Vec<f32>, String> {
 
     let sample_rate = *state.sample_rate.lock();
 
-    // 16kHz'e resample et (Whisper icin)
-    let resampled = if sample_rate != 16000 {
-        resample_audio(&raw_audio, sample_rate, 16000)?
-    } else {
-        raw_audio
-    };
+    // Gurultu bastirma: 48kHz'e resample → nnnoiseless denoise → 16kHz'e resample
+    let resampled = denoise_and_resample(&raw_audio, sample_rate)?;
 
     log::info!(
         "Kayit durduruldu - {} ornek ({:.1}s)",
@@ -149,12 +148,48 @@ pub fn get_level(state: &SharedAudioState) -> f32 {
     *state.level.lock()
 }
 
+/// Ses verisini nnnoiseless (RNNoise) ile denoise edip 16kHz'e resample et.
+/// RNNoise 48kHz gerektirir: orijinal→48kHz→denoise→16kHz
+fn denoise_and_resample(audio: &[f32], sample_rate: u32) -> Result<Vec<f32>, String> {
+    // Adim 1: 48kHz'e resample (nnnoiseless icin)
+    let audio_48k = if sample_rate == 48000 {
+        audio.to_vec()
+    } else {
+        resample_audio(audio, sample_rate, 48000)?
+    };
+
+    // Adim 2: nnnoiseless denoise (48kHz, frame_size=480)
+    // Wet/dry mix: %60 denoised + %40 orijinal — Turkce fricatifleri korumak icin
+    // (RNNoise Ingilizce ses uzerinde egitilmis, Turkce ş/ç/ğ seslerini bosabilir)
+    let denoised = {
+        use nnnoiseless::DenoiseState;
+        let mut state = Box::new(DenoiseState::new());
+        let mut clean = Vec::with_capacity(audio_48k.len());
+        let mut out_buf = [0.0f32; DenoiseState::FRAME_SIZE];
+
+        for chunk in audio_48k.chunks(DenoiseState::FRAME_SIZE) {
+            let mut frame = [0.0f32; DenoiseState::FRAME_SIZE];
+            frame[..chunk.len()].copy_from_slice(chunk);
+            state.process_frame(&mut out_buf, &frame);
+            // Wet/dry mix: orijinal sesi koruyarak denoise
+            for j in 0..chunk.len() {
+                clean.push(out_buf[j] * 0.6 + chunk[j] * 0.4);
+            }
+        }
+        clean
+    };
+    log::info!("Gurultu bastirma uygulandi ({} sample @ 48kHz, mix 60/40)", denoised.len());
+
+    // Adim 3: 16kHz'e resample (Whisper icin)
+    resample_audio(&denoised, 48000, 16000)
+}
+
 fn resample_audio(input: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>, String> {
     let params = SincInterpolationParameters {
         sinc_len: 256,
-        f_cutoff: 0.95,
+        f_cutoff: 0.90,
         interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 256,
+        oversampling_factor: 128,
         window: WindowFunction::BlackmanHarris2,
     };
 

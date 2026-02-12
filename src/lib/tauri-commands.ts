@@ -29,6 +29,7 @@ export interface TranscriptionResponse {
   text: string;
   duration_ms: number;
   status: string;
+  original_text: string;
 }
 
 export interface AppSettings {
@@ -41,6 +42,10 @@ export interface AppSettings {
   auto_paste: boolean;
   language: string;
   transcription_engine: string;
+  deepgram_api_key: string;
+  azure_speech_key: string;
+  azure_speech_region: string;
+  google_cloud_api_key: string;
   voice_activation: boolean;
   wake_word: string;
   sound_enabled: boolean;
@@ -175,6 +180,11 @@ export interface UserCorrection {
   right: string;
   count: number;
   last_seen: number;
+  revert_count: number;
+  status: string;
+  first_seen: number;
+  source: string;
+  confidence: number;
 }
 
 export interface UserProfile {
@@ -248,4 +258,16 @@ export async function exportCorrections(): Promise<string> {
 
 export async function importCorrections(json: string): Promise<number> {
   return invoke("import_corrections", { json });
+}
+
+export async function reportCorrectionRevert(wrong: string, right: string): Promise<void> {
+  return invoke("report_correction_revert", { wrong, right });
+}
+
+export async function promoteCorrection(wrong: string): Promise<void> {
+  return invoke("promote_correction", { wrong });
+}
+
+export async function demoteCorrection(wrong: string): Promise<void> {
+  return invoke("demote_correction", { wrong });
 }

@@ -167,6 +167,9 @@ pub fn run() {
             commands::corrections::reset_learning_data,
             commands::corrections::export_corrections,
             commands::corrections::import_corrections,
+            commands::corrections::report_correction_revert,
+            commands::corrections::promote_correction,
+            commands::corrections::demote_correction,
             show_main_window,
             hide_main_window,
             change_shortcut,
@@ -379,19 +382,16 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
 
                 let is_active = OVERLAY_BAR_ACTIVE.load(Ordering::Relaxed);
 
-                // Hit area: bar her zaman alt-ortada
-                // Aktif (kayit/donusum): genis alan
-                // Idle: sadece kucuk centik alani
-                let (x_min, x_max, y_min) = if is_active {
-                    // Recording/transcribing: center %90, bottom %92
-                    (0.05, 0.95, 0.08)
-                } else {
-                    // Idle: center %30, bottom %80 (centik + hover padding)
-                    (0.35, 0.65, 0.80)
-                };
+                // Idle: tum pencere tamamen gecirgen — taskbar tiklamalari engellenmez
+                if !is_active {
+                    return HTTRANSPARENT;
+                }
+
+                // Aktif (kayit/donusum): sadece bar gorselinin oldugu dar alan
+                // center %50, bottom %60 — kenarlar gecirgen kalir
+                let (x_min, x_max, y_min) = (0.25, 0.75, 0.40);
 
                 if rx >= x_min && rx <= x_max && ry >= y_min {
-                    // Bar alaninda — normal hit test
                     let orig = ORIGINAL_WNDPROC.load(Ordering::Acquire);
                     if orig != 0 {
                         return CallWindowProcW(orig, hwnd, msg, wp, lp);
@@ -400,7 +400,7 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
                     }
                 }
 
-                // Seffaf alan — tiklamalar altindaki pencereye gecsin
+                // Aktif ama bar disinda — gecirgen
                 return HTTRANSPARENT;
             }
 
@@ -410,6 +410,10 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
             } else {
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
+        }
+
+        extern "system" {
+            fn GetClassNameW(hwnd: isize, buf: *mut u16, max_count: i32) -> i32;
         }
 
         // Adim 1: EnumWindows ile overlay HWND'sini bul (sadece kaydet)
@@ -426,19 +430,42 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
             // Overlay: genislik > 100 VE yukseklik 30-200 arasi
             if w < 100 || h < 30 || h >= 200 { return 1; }
 
+            // Pencere sinifi kontrolu: Chrome_WidgetWin ile baslamali
+            let mut class_buf = [0u16; 256];
+            let len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), 256);
+            if len > 0 {
+                let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
+                if !class_name.starts_with("Chrome_WidgetWin") {
+                    return 1;
+                }
+            }
+
             eprintln!("[fisilti] Overlay HWND bulundu: {}, boyut={}x{}", hwnd, w, h);
             OVERLAY_HWND.store(hwnd, Ordering::Release);
             0 // Bulundu, dur
         }
 
-        unsafe {
-            let pid = GetCurrentProcessId();
-            EnumWindows(enum_cb, pid as isize);
+        // HWND bulunamazsa retry (maks 3 deneme, 500ms arayla)
+        for attempt in 0..3 {
+            unsafe {
+                let pid = GetCurrentProcessId();
+                EnumWindows(enum_cb, pid as isize);
+            }
+
+            let hwnd = OVERLAY_HWND.load(Ordering::Acquire);
+            if hwnd != 0 {
+                break;
+            }
+
+            if attempt < 2 {
+                eprintln!("[fisilti] Overlay HWND bulunamadi, {}. deneme, 500ms sonra tekrar deneniyor...", attempt + 1);
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
         }
 
         let hwnd = OVERLAY_HWND.load(Ordering::Acquire);
         if hwnd == 0 {
-            eprintln!("[fisilti] HATA: Overlay HWND bulunamadi!");
+            eprintln!("[fisilti] HATA: Overlay HWND bulunamadi (3 deneme sonrasi)!");
             return;
         }
 

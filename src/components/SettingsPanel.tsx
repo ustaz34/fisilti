@@ -32,6 +32,8 @@ function toBackend(s: AppSettings) {
     theme: s.theme, shortcut: s.shortcut, recording_mode: s.recordingMode,
     vad_threshold: s.vadThreshold, auto_paste: s.autoPaste,
     language: s.language, transcription_engine: s.transcriptionEngine,
+    deepgram_api_key: s.deepgramApiKey, azure_speech_key: s.azureSpeechKey,
+    azure_speech_region: s.azureSpeechRegion, google_cloud_api_key: s.googleCloudApiKey,
     voice_activation: s.voiceActivation, wake_word: s.wakeWord,
     sound_enabled: s.soundEnabled, auto_start: s.autoStart,
     silence_timeout: s.silenceTimeout, max_record_duration: s.maxRecordDuration,
@@ -308,7 +310,7 @@ export function SettingsPanel() {
     }, 0);
   };
 
-  const isWeb = settings.transcriptionEngine === "web";
+  const engine = settings.transcriptionEngine;
 
   return (
     <div className="sp-root">
@@ -316,12 +318,21 @@ export function SettingsPanel() {
       {/* ── Motor ── */}
       <Section title="Motor" icon={icons.engine}>
         <div className="sp-engine-grid">
-          <EngineCard active={isWeb} title="Google" desc="Online · Hizli"
+          <EngineCard active={engine === "web"} title="Google" desc="Online · Hizli"
             icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>}
             onClick={() => save({ transcriptionEngine: "web" })} />
-          <EngineCard active={!isWeb} title="Whisper" desc="Offline · Yerel"
+          <EngineCard active={engine === "whisper"} title="Whisper" desc="Offline · Yerel"
             icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /></svg>}
             onClick={() => save({ transcriptionEngine: "whisper" })} />
+          <EngineCard active={engine === "deepgram"} title="Deepgram" desc="Bulut · Nova-3"
+            icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>}
+            onClick={() => save({ transcriptionEngine: "deepgram" })} />
+          <EngineCard active={engine === "azure"} title="Azure" desc="Bulut · Speech"
+            icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 12h8M12 8v8"/></svg>}
+            onClick={() => save({ transcriptionEngine: "azure" })} />
+          <EngineCard active={engine === "google-cloud"} title="G. Cloud" desc="Bulut · Chirp"
+            icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>}
+            onClick={() => save({ transcriptionEngine: "google-cloud" })} />
         </div>
       </Section>
 
