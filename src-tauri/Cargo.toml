@@ -52,3 +52,6 @@ features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
 ]
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
