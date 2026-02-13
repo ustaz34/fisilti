@@ -8,13 +8,17 @@ import { LearningPanel } from "./LearningPanel";
 import { HistoryPanel } from "./HistoryPanel";
 import { ColorsPanel } from "./ColorsPanel";
 import { CloudEnginesPanel } from "./CloudEnginesPanel";
+import { TTSPanel } from "./TTSPanel";
 import { useSettingsStore, type AppSettings } from "../stores/settingsStore";
 import { useTranscriptionStore } from "../stores/transcriptionStore";
 import { useRecordingStore } from "../stores/recordingStore";
+import { useTTSStore } from "../stores/ttsStore";
+import { getTTSService } from "../lib/ttsService";
 import { getSettings } from "../lib/tauri-commands";
+import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { listen } from "@tauri-apps/api/event";
 
-type Tab = "general" | "cloud" | "models" | "stats" | "learning" | "history" | "colors" | "about";
+type Tab = "general" | "cloud" | "models" | "stats" | "learning" | "history" | "colors" | "seslendir" | "about";
 
 const TAB_TITLES: Record<Tab, string> = {
   general: "Genel Ayarlar",
@@ -24,6 +28,7 @@ const TAB_TITLES: Record<Tab, string> = {
   learning: "Ogrenme",
   history: "Gecmis",
   colors: "Renkler",
+  seslendir: "Seslendir",
   about: "Hakkinda",
 };
 
@@ -78,6 +83,7 @@ export function SettingsApp() {
           paragraphBreak: saved.paragraph_break ?? false,
           notifications: saved.notifications ?? true,
           logLevel: saved.log_level ?? "info",
+          ttsShortcut: saved.tts_shortcut ?? "Ctrl+Shift+R",
         });
       })
       .catch(console.error);
@@ -100,6 +106,20 @@ export function SettingsApp() {
     });
     return () => {
       unlistenHistory.then((fn) => fn());
+    };
+  }, []);
+
+  // Wake word durum bildirimlerini overlay penceresinden dinle
+  useEffect(() => {
+    const unlisten = listen<{ status: string; error: string | null }>("wake-word-status", (event) => {
+      const { status, error } = event.payload;
+      useSettingsStore.getState().setWakeWordStatus(
+        status as import("../stores/settingsStore").WakeWordStatus,
+        error,
+      );
+    });
+    return () => {
+      unlisten.then((fn) => fn());
     };
   }, []);
 
@@ -139,6 +159,7 @@ export function SettingsApp() {
               paragraphBreak: saved.paragraph_break ?? false,
               notifications: saved.notifications ?? true,
               logLevel: saved.log_level ?? "info",
+              ttsShortcut: saved.tts_shortcut ?? "Ctrl+Shift+R",
             });
           })
           .catch(console.error);
@@ -146,6 +167,46 @@ export function SettingsApp() {
     };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, []);
+
+  // TTS: Panodan oku event'i (global kisayol + tray menu)
+  useEffect(() => {
+    // tts-read-clipboard: eski format (panoyu frontend okur)
+    const unlisten1 = listen("tts-read-clipboard", async () => {
+      try {
+        const clipText = await readText();
+        if (clipText && clipText.trim()) {
+          getTTSService().speak(clipText);
+        }
+      } catch (e) {
+        console.error("TTS pano okuma hatasi:", e);
+      }
+    });
+    // tts-speak-text: yeni format (metin dogrudan Rust'tan gelir)
+    const unlisten2 = listen<string>("tts-speak-text", (event) => {
+      const text = event.payload;
+      if (text && text.trim()) {
+        getTTSService().speak(text);
+      }
+    });
+    return () => {
+      unlisten1.then((fn) => fn());
+      unlisten2.then((fn) => fn());
+    };
+  }, []);
+
+  // TTS: overlay'den gelen kontrol komutlari (pause/resume/stop)
+  useEffect(() => {
+    const unlisten = listen<{ action: string }>("tts-control", (event) => {
+      const { action } = event.payload;
+      const svc = getTTSService();
+      if (action === "pause") svc.pause();
+      else if (action === "resume") svc.resume();
+      else if (action === "stop") svc.stop();
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   const handleClose = () => {
@@ -159,7 +220,7 @@ export function SettingsApp() {
   // Splash screen
   if (splash !== "gone") {
     return (
-      <div className={`w-full h-screen bg-[var(--color-bg-primary)] rounded-2xl overflow-hidden flex flex-col items-center justify-center border border-[rgba(var(--accent-rgb),0.15)] ${splash === "fading" ? "splash-out" : ""}`}>
+      <div className={`w-full h-screen bg-[var(--color-bg-primary)] rounded-2xl overflow-hidden flex flex-col items-center justify-center shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_8px_32px_rgba(0,0,0,0.4)] ${splash === "fading" ? "splash-out" : ""}`}>
         <img
           src="/logo.png"
           alt="Fisilti"
@@ -176,7 +237,7 @@ export function SettingsApp() {
   }
 
   return (
-    <div className={`w-full h-screen bg-[var(--color-bg-primary)] rounded-2xl overflow-hidden flex border border-[rgba(var(--accent-rgb),0.12)] transition-[opacity,transform] duration-300 ${closing ? "opacity-0 scale-95" : "opacity-100 scale-100"}`}>
+    <div className={`w-full h-screen bg-[var(--color-bg-primary)] rounded-2xl overflow-hidden flex shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_8px_32px_rgba(0,0,0,0.4)] transition-[opacity,transform] duration-300 ${closing ? "opacity-0 scale-95" : "opacity-100 scale-100"}`}>
 
       {/* Kapanis bildirimi */}
       {closing && (
@@ -282,6 +343,14 @@ export function SettingsApp() {
             </svg>
           </NavButton>
 
+          <NavButton active={activeTab === "seslendir"} label="Seslendir" expanded={sidebarExpanded} onClick={() => setActiveTab("seslendir")}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+              <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+            </svg>
+          </NavButton>
+
           <NavButton active={activeTab === "about"} label="Hakkinda" expanded={sidebarExpanded} onClick={() => setActiveTab("about")}>
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
               <circle cx="12" cy="12" r="10"/>
@@ -335,6 +404,7 @@ export function SettingsApp() {
           {activeTab === "learning" && <LearningTab />}
           {activeTab === "history" && <HistoryTab />}
           {activeTab === "colors" && <ColorsTab />}
+          {activeTab === "seslendir" && <SeslendirTab />}
           {activeTab === "about" && <AboutTab />}
         </div>
       </div>
@@ -433,6 +503,7 @@ function StatusBar() {
   const { isRecording, duration } = useRecordingStore();
   const { isTranscribing, currentText } = useTranscriptionStore();
   const { settings } = useSettingsStore();
+  const ttsStatus = useTTSStore((s) => s.status);
 
   return (
     <div className="mx-4 mb-2 px-3.5 py-2.5 rounded-xl bg-[rgba(var(--accent-rgb),0.03)] border border-[rgba(var(--accent-rgb),0.06)]">
@@ -443,7 +514,13 @@ function StatusBar() {
               ? "bg-[var(--color-accent)] shadow-[0_0_6px_rgba(var(--accent-rgb),0.5)] animate-pulse"
               : isTranscribing
                 ? "bg-[var(--color-accent)]/60 animate-pulse"
-                : "bg-[rgba(var(--accent-rgb),0.15)]"
+                : ttsStatus === "loading"
+                  ? "bg-[var(--color-accent)]/50 animate-pulse"
+                  : ttsStatus === "speaking"
+                    ? "bg-[var(--color-accent)] shadow-[0_0_6px_rgba(var(--accent-rgb),0.4)] tts-pulse"
+                    : ttsStatus === "paused"
+                      ? "bg-[var(--color-accent)]/40"
+                      : "bg-[rgba(var(--accent-rgb),0.15)]"
           }`}
         />
         <span className="text-[10px] text-[rgba(255,255,255,0.4)] flex-1">
@@ -451,7 +528,13 @@ function StatusBar() {
             ? `Kayit yapiliyor... ${duration}s`
             : isTranscribing
               ? "Donusturuluyor..."
-              : "Hazir"}
+              : ttsStatus === "loading"
+                ? "Ses hazirlaniyor..."
+                : ttsStatus === "speaking"
+                  ? "Seslendiriliyor..."
+                  : ttsStatus === "paused"
+                    ? "Duraklatildi"
+                    : "Hazir"}
         </span>
         <span className="text-[9px] text-[rgba(255,255,255,0.18)] font-mono">
           {settings.transcriptionEngine === "web" ? "Web Speech"
@@ -529,11 +612,19 @@ function ColorsTab() {
   );
 }
 
+function SeslendirTab() {
+  return (
+    <div className="settings-content">
+      <TTSPanel />
+    </div>
+  );
+}
+
 function AboutTab() {
   const FEATURES = [
     {
       title: "Cevrimdisi Donusum",
-      desc: "Whisper AI ile internet baglantisi gerektirmeden yuksek dogruluklu donusum",
+      desc: "Whisper AI ile internet baglantisi gerektirmeden yuksek dogruluklu ses-yazi donusum",
       icon: (
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
           <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
@@ -543,12 +634,23 @@ function AboutTab() {
     },
     {
       title: "Canli Donusum",
-      desc: "Google Web Speech API ile gercek zamanli konusmadan metne donusum",
+      desc: "Web Speech, Deepgram, Azure ve Google Cloud motorlariyla gercek zamanli donusum",
       icon: (
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
           <circle cx="12" cy="12" r="10"/>
           <line x1="2" y1="12" x2="22" y2="12"/>
           <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+        </svg>
+      ),
+    },
+    {
+      title: "Metin Seslendirme",
+      desc: "Edge TTS ile secili metni veya panodaki icerigi dogal seslerle oku",
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
         </svg>
       ),
     },
@@ -571,17 +673,29 @@ function AboutTab() {
         </svg>
       ),
     },
+    {
+      title: "Global Kisayollar",
+      desc: "Herhangi bir uygulamada tek tus veya kombinasyonla kayit ve seslendirme",
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/>
+          <path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h8M6 16h.01M18 16h.01"/>
+        </svg>
+      ),
+    },
   ];
 
   const SHORTCUTS = [
     { keys: ["Ctrl", "Shift", "Space"], desc: "Kaydi baslat / durdur" },
     { keys: ["Ctrl", "Shift", "S"], desc: "Ayarlar penceresini ac" },
+    { keys: ["Ctrl", "Shift", "R"], desc: "Secili metni seslendir" },
     { keys: ["Esc"], desc: "Kaydi iptal et" },
   ];
 
   const TECH_STACK = [
     { name: "Tauri v2", color: "rgba(250, 228, 207, 0.15)" },
     { name: "Whisper AI", color: "rgba(250, 228, 207, 0.12)" },
+    { name: "Edge TTS", color: "rgba(250, 228, 207, 0.10)" },
     { name: "React 19", color: "rgba(250, 228, 207, 0.10)" },
     { name: "Rust", color: "rgba(250, 228, 207, 0.12)" },
     { name: "Zustand", color: "rgba(250, 228, 207, 0.08)" },
@@ -602,7 +716,8 @@ function AboutTab() {
         <h2 className="about-title">FISILTI</h2>
         <span className="about-version">v2.0.0</span>
         <p className="about-desc">
-          Profesyonel ses-yazi donusturucu. Whisper AI ve Google Web Speech motorlari ile guclendirilmis,
+          Profesyonel ses-yazi donusturucu ve metin seslendirici. Whisper AI, Web Speech, Deepgram,
+          Azure ve Google Cloud motorlari ile guclendirilmis, Edge TTS ile metin seslendirme,
           akilli ogrenme ve Turkce optimizasyon sistemi ile desteklenmis masaustu uygulamasi.
         </p>
       </div>
@@ -667,7 +782,7 @@ function AboutTab() {
       <div className="about-footer">
         <span className="about-footer-label">Yapimci</span>
         <span className="about-footer-name">ustaz</span>
-        <span className="about-footer-year">2025</span>
+        <span className="about-footer-year">2025 - 2026</span>
       </div>
     </div>
   );

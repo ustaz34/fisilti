@@ -94,6 +94,9 @@ pub fn get_settings(app_handle: tauri::AppHandle) -> AppSettings {
             let log_level = store.get("log_level")
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "info".to_string());
+            let tts_shortcut = store.get("tts_shortcut")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "Ctrl+Shift+R".to_string());
 
             AppSettings {
                 selected_model: model,
@@ -125,6 +128,7 @@ pub fn get_settings(app_handle: tauri::AppHandle) -> AppSettings {
                 paragraph_break,
                 notifications,
                 log_level,
+                tts_shortcut,
             }
         }
         Err(_) => AppSettings::default(),
@@ -165,6 +169,7 @@ pub fn save_settings(app_handle: tauri::AppHandle, settings: AppSettings) -> Res
     store.set("paragraph_break", serde_json::json!(settings.paragraph_break));
     store.set("notifications", serde_json::json!(settings.notifications));
     store.set("log_level", serde_json::json!(settings.log_level));
+    store.set("tts_shortcut", serde_json::json!(settings.tts_shortcut));
 
     store.save().map_err(|e| format!("Ayarlar kaydedilemedi: {}", e))?;
 

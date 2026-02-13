@@ -10,6 +10,7 @@
 
 import type { WakeWordStatus } from "../stores/settingsStore";
 import { toBcp47Locale } from "./languageUtils";
+import { emit } from "@tauri-apps/api/event";
 
 let recognition: SpeechRecognition | null = null;
 let shouldRestart = false;
@@ -23,6 +24,8 @@ let statusCallback: ((status: WakeWordStatus, error?: string) => void) | null = 
 
 function reportStatus(status: WakeWordStatus, error?: string) {
   statusCallback?.(status, error);
+  // Ayarlar penceresine durum bildir (ayri WebView2 — store paylasılmıyor)
+  emit("wake-word-status", { status, error: error ?? null }).catch(() => {});
 }
 
 /**
@@ -185,9 +188,18 @@ function startSession(language: string, onWakeWord: () => void) {
     }
 
     if (event.error === "audio-capture") {
-      reportStatus("error", "Mikrofon yakalanamadi");
-      shouldRestart = false;
       recognition = null;
+      // Mikrofon gecici mesgul olabilir (kayit bittiginde serbest kalir)
+      if (shouldRestart) {
+        reportStatus("starting");
+        setTimeout(() => {
+          if (shouldRestart && mySession === sessionCounter) {
+            startSession(language, onWakeWord);
+          }
+        }, 2000);
+      } else {
+        reportStatus("error", "Mikrofon yakalanamadi");
+      }
       return;
     }
 
@@ -199,7 +211,7 @@ function startSession(language: string, onWakeWord: () => void) {
           if (shouldRestart && mySession === sessionCounter) {
             startSession(language, onWakeWord);
           }
-        }, 200);
+        }, 1500); // 200ms -> 1500ms: network hatasi sonrasi daha uzun bekleme
       }
       return;
     }

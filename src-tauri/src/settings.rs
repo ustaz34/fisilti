@@ -33,6 +33,13 @@ pub struct AppSettings {
     // Sistem
     pub notifications: bool,
     pub log_level: String,
+    // TTS
+    #[serde(default = "default_tts_shortcut")]
+    pub tts_shortcut: String,
+}
+
+fn default_tts_shortcut() -> String {
+    "Ctrl+Shift+R".to_string()
 }
 
 impl Default for AppSettings {
@@ -67,6 +74,7 @@ impl Default for AppSettings {
             paragraph_break: false,
             notifications: true,
             log_level: "info".to_string(),
+            tts_shortcut: "Ctrl+Shift+R".to_string(),
         }
     }
 }

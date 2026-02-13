@@ -62,6 +62,7 @@ export interface AppSettings {
   paragraph_break: boolean;
   notifications: boolean;
   log_level: string;
+  tts_shortcut: string;
 }
 
 export interface HistoryEntry {
@@ -141,7 +142,10 @@ export async function hideMainWindow(): Promise<void> {
   return invoke("hide_main_window");
 }
 
-export async function changeShortcut(shortcut: string): Promise<void> {
+export async function changeShortcut(shortcut: string, isTts?: boolean): Promise<void> {
+  if (isTts) {
+    return invoke("change_tts_shortcut", { shortcut });
+  }
   return invoke("change_shortcut", { shortcut });
 }
 

@@ -1,6 +1,8 @@
 mod audio;
 mod commands;
 mod corrections;
+mod edge_tts;
+mod keyboard_hook;
 mod model;
 mod settings;
 mod text;
@@ -12,6 +14,8 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+#[cfg(target_os = "windows")]
+use windows::core::Interface;
 
 /// Overlay penceresinin Win32 HWND'si (setup_overlay_win32 tarafindan set edilir)
 static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -21,6 +25,8 @@ static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static OVERLAY_FOLLOW_CURSOR: AtomicBool = AtomicBool::new(true);
 /// Overlay bar'in aktif durumu (recording veya transcribing = true)
 static OVERLAY_BAR_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Kisayol duzenleme modu — true iken global kisayollar askiya alinir
+pub(crate) static SHORTCUTS_SUSPENDED: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -46,11 +52,14 @@ pub fn run() {
             // Sistem tepsisi olustur
             let show_item = MenuItemBuilder::with_id("show", "Göster")
                 .build(app)?;
+            let tts_item = MenuItemBuilder::with_id("tts_clipboard", "Panodaki Metni Oku")
+                .build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Çıkış")
                 .build(app)?;
 
             let menu = MenuBuilder::new(app)
                 .item(&show_item)
+                .item(&tts_item)
                 .separator()
                 .item(&quit_item)
                 .build()?;
@@ -66,6 +75,20 @@ pub fn run() {
                     match event.id().as_ref() {
                         "show" => {
                             show_main(app);
+                        }
+                        "tts_clipboard" => {
+                            // Panodaki metni TTS ile oku
+                            let app_clone = app.clone();
+                            std::thread::spawn(move || {
+                                let clip_text = arboard::Clipboard::new()
+                                    .and_then(|mut cb| cb.get_text())
+                                    .unwrap_or_default();
+                                if !clip_text.trim().is_empty() {
+                                    if let Some(window) = app_clone.get_webview_window("main") {
+                                        window.emit("tts-speak-text", &clip_text).ok();
+                                    }
+                                }
+                            });
                         }
                         "quit" => {
                             app.exit(0);
@@ -88,6 +111,9 @@ pub fn run() {
             // Global kisayol kaydet
             setup_global_shortcut(&app_handle);
 
+            // TTS global kisayol kaydet
+            setup_tts_shortcut(&app_handle);
+
             // Overlay penceresi - baslik temizle, konumlandir, goster
             if let Some(window) = app.get_webview_window("overlay") {
                 window.set_title("").ok();
@@ -95,6 +121,9 @@ pub fn run() {
                 // WebView2 arka planini tam seffaf yap (beyaz tabaka sorunu icin)
                 use tauri::webview::Color;
                 window.set_background_color(Some(Color(0, 0, 0, 0))).ok();
+
+                // Baslangicta tum pencere click-through (idle)
+                window.set_ignore_cursor_events(true).ok();
 
                 snap_overlay_to_bottom(&window);
                 window.show().ok();
@@ -113,6 +142,10 @@ pub fn run() {
 
             // Ana pencere - kapatinca tepsiye gizle
             if let Some(window) = app.get_webview_window("main") {
+                // WebView2 arka planini seffaf yap (transparent: true uyumu)
+                use tauri::webview::Color as MainColor;
+                window.set_background_color(Some(MainColor(0, 0, 0, 0))).ok();
+
                 window.show().ok();
                 window.set_focus().ok();
 
@@ -124,6 +157,9 @@ pub fn run() {
                     }
                 });
             }
+
+            // Ana pencereye DWM frame extension uygula (transparent + decorations:false click fix)
+            setup_main_window_win32(app.handle().clone());
 
             // Overlay follow cursor ayarini yukle
             {
@@ -173,11 +209,145 @@ pub fn run() {
             show_main_window,
             hide_main_window,
             change_shortcut,
+            change_tts_shortcut,
             set_overlay_follow_cursor,
             set_overlay_bar_active,
+            suspend_shortcuts,
+            resume_shortcuts,
+            edge_tts_get_voices,
+            edge_tts_synthesize,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri uygulamasi baslatilirken hata olustu");
+}
+
+/// Ana pencere WndProc — orijinal WndProc'u saklamak icin static
+static MAIN_ORIGINAL_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Ana pencereye Win32 stil uygula — DWM cerceve/border'i tamamen kaldir
+fn setup_main_window_win32(app_handle: tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        extern "system" {
+            fn EnumWindows(cb: unsafe extern "system" fn(isize, isize) -> i32, lp: isize) -> i32;
+            fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+            fn GetCurrentProcessId() -> u32;
+            fn GetWindowRect(hwnd: isize, rect: *mut [i32; 4]) -> i32;
+            fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+            fn SetWindowLongPtrW(hwnd: isize, index: i32, val: isize) -> isize;
+            fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, w: i32, h: i32, flags: u32) -> i32;
+            fn LoadLibraryA(name: *const u8) -> isize;
+            fn GetProcAddress(module: isize, name: *const u8) -> isize;
+            fn DefWindowProcW(hwnd: isize, msg: u32, wp: usize, lp: isize) -> isize;
+            fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wp: usize, lp: isize) -> isize;
+        }
+
+        const GWL_STYLE: i32 = -16;
+        const GWL_EXSTYLE: i32 = -20;
+        const GWLP_WNDPROC: i32 = -4;
+        const WS_EX_APPWINDOW: isize = 0x00040000;
+        const WS_CAPTION: isize = 0x00C00000;
+        const WS_THICKFRAME: isize = 0x00040000;
+        const WS_BORDER: isize = 0x00800000;
+        const SWP_NOMOVE: u32 = 0x0002;
+        const SWP_NOSIZE: u32 = 0x0001;
+        const SWP_NOZORDER: u32 = 0x0004;
+        const SWP_FRAMECHANGED: u32 = 0x0020;
+        const WM_NCCALCSIZE: u32 = 0x0083;
+
+        static MAIN_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+        /// Subclassed WndProc: WM_NCCALCSIZE -> 0 dondurerek non-client area (1px ust border) kaldir
+        unsafe extern "system" fn main_wndproc(hwnd: isize, msg: u32, wp: usize, lp: isize) -> isize {
+            if msg == WM_NCCALCSIZE && wp == 1 {
+                // wparam=TRUE: non-client alanini sifirla — 1px ust border kalkar
+                return 0;
+            }
+            let orig = MAIN_ORIGINAL_WNDPROC.load(Ordering::Acquire);
+            if orig != 0 {
+                CallWindowProcW(orig, hwnd, msg, wp, lp)
+            } else {
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+        }
+
+        unsafe extern "system" fn find_main(hwnd: isize, our_pid: isize) -> i32 {
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid != our_pid as u32 { return 1; }
+
+            let mut rect = [0i32; 4];
+            GetWindowRect(hwnd, &mut rect);
+            let w = rect[2] - rect[0];
+            let h = rect[3] - rect[1];
+
+            if w < 200 || h < 200 { return 1; }
+
+            MAIN_HWND.store(hwnd, Ordering::Release);
+            0
+        }
+
+        unsafe {
+            let pid = GetCurrentProcessId();
+            EnumWindows(find_main, pid as isize);
+        }
+
+        let hwnd = MAIN_HWND.load(Ordering::Acquire);
+        if hwnd == 0 {
+            eprintln!("[fisilti] Ana pencere HWND bulunamadi");
+            return;
+        }
+
+        unsafe {
+            // WS_CAPTION, WS_THICKFRAME, WS_BORDER kaldir
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style & !WS_CAPTION & !WS_THICKFRAME & !WS_BORDER);
+
+            // WS_EX_APPWINDOW — taskbar'da gorunsun
+            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_APPWINDOW);
+
+            // WndProc subclass — WM_NCCALCSIZE yakalayarak 1px ust border kaldir
+            let orig = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, main_wndproc as isize);
+            MAIN_ORIGINAL_WNDPROC.store(orig, Ordering::Release);
+
+            let dwm = LoadLibraryA(b"dwmapi.dll\0".as_ptr());
+            if dwm != 0 {
+                let attr_fn = GetProcAddress(dwm, b"DwmSetWindowAttribute\0".as_ptr());
+                if attr_fn != 0 {
+                    let f: unsafe extern "system" fn(isize, u32, *const u32, u32) -> i32 = std::mem::transmute(attr_fn);
+                    // DWMWA_USE_IMMERSIVE_DARK_MODE (20)
+                    let dark: u32 = 1;
+                    f(hwnd, 20, &dark, 4);
+                    // DWMWA_WINDOW_CORNER_PREFERENCE (33) = DWMWCP_ROUND (2)
+                    // Yuvarlak koseler — CSS rounded-2xl ile uyumlu
+                    let round: u32 = 2;
+                    f(hwnd, 33, &round, 4);
+                    // DWMWA_TRANSITIONS_FORCEDISABLED (2)
+                    let v: u32 = 1;
+                    f(hwnd, 2, &v, 4);
+                }
+
+                // DWM frame'i sifirla
+                let ext_fn = GetProcAddress(dwm, b"DwmExtendFrameIntoClientArea\0".as_ptr());
+                if ext_fn != 0 {
+                    #[repr(C)]
+                    struct Margins { l: i32, r: i32, t: i32, b: i32 }
+                    let f: unsafe extern "system" fn(isize, *const Margins) -> i32 = std::mem::transmute(ext_fn);
+                    f(hwnd, &Margins { l: 0, r: 0, t: 0, b: 0 });
+                }
+            }
+
+            // Stil degisikligini etkinlestir
+            SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
+            eprintln!("[fisilti] Ana pencere cerceve tamamen kaldirildi: HWND={}", hwnd);
+        }
+
+        let _ = app_handle;
+    });
 }
 
 /// Overlay'i belirtilen monitorun alt ortasina konumlandir (sabit 300x48 logical)
@@ -412,10 +582,6 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
             }
         }
 
-        extern "system" {
-            fn GetClassNameW(hwnd: isize, buf: *mut u16, max_count: i32) -> i32;
-        }
-
         // Adim 1: EnumWindows ile overlay HWND'sini bul (sadece kaydet)
         unsafe extern "system" fn enum_cb(hwnd: isize, our_pid: isize) -> i32 {
             let mut pid: u32 = 0;
@@ -429,16 +595,6 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
 
             // Overlay: genislik > 100 VE yukseklik 30-200 arasi
             if w < 100 || h < 30 || h >= 200 { return 1; }
-
-            // Pencere sinifi kontrolu: Chrome_WidgetWin ile baslamali
-            let mut class_buf = [0u16; 256];
-            let len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), 256);
-            if len > 0 {
-                let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
-                if !class_name.starts_with("Chrome_WidgetWin") {
-                    return 1;
-                }
-            }
 
             eprintln!("[fisilti] Overlay HWND bulundu: {}, boyut={}x{}", hwnd, w, h);
             OVERLAY_HWND.store(hwnd, Ordering::Release);
@@ -572,6 +728,8 @@ fn register_shortcut(app_handle: &tauri::AppHandle, shortcut: &str) -> Result<()
 
     let app = app_handle.clone();
     app_handle.global_shortcut().on_shortcut(shortcut, move |_app, sc, event| {
+        // Kisayol duzenleme modundaysa yoksay
+        if SHORTCUTS_SUSPENDED.load(Ordering::Relaxed) { return; }
         match event.state {
             tauri_plugin_global_shortcut::ShortcutState::Pressed => {
                 commands::input::save_foreground_internal();
@@ -601,9 +759,27 @@ fn setup_global_shortcut(app_handle: &tauri::AppHandle) {
             .unwrap_or_else(|| "Ctrl+Shift+Space".to_string())
     };
 
-    match register_shortcut(app_handle, &shortcut) {
-        Ok(_) => log::info!("Global kisayol kaydedildi: {}", shortcut),
-        Err(e) => log::warn!("Global kisayol kaydedilemedi: {}", e),
+    // Keyboard hook'u baslat (tek tus destegi icin)
+    keyboard_hook::install(app_handle.clone());
+
+    if keyboard_hook::is_single_key(&shortcut) {
+        // Tek tus — hook ile yakala
+        if let Some(vk) = keyboard_hook::key_name_to_vk(&shortcut) {
+            keyboard_hook::set_key(vk);
+            log::info!("Klavye hook ile kisayol kaydedildi: {} (vk={:#x})", shortcut, vk);
+        } else {
+            log::warn!("Bilinmeyen tus: {}, varsayilan kisayola donuluyor", shortcut);
+            match register_shortcut(app_handle, "Ctrl+Shift+Space") {
+                Ok(_) => log::info!("Varsayilan kisayol kaydedildi: Ctrl+Shift+Space"),
+                Err(e) => log::warn!("Varsayilan kisayol kaydedilemedi: {}", e),
+            }
+        }
+    } else {
+        // Modifier kombinasyonu — global shortcut ile yakala
+        match register_shortcut(app_handle, &shortcut) {
+            Ok(_) => log::info!("Global kisayol kaydedildi: {}", shortcut),
+            Err(e) => log::warn!("Global kisayol kaydedilemedi: {}", e),
+        }
     }
 }
 
@@ -614,16 +790,382 @@ fn set_overlay_follow_cursor(enabled: bool) {
 }
 
 #[tauri::command]
-fn set_overlay_bar_active(active: bool) {
+fn suspend_shortcuts() {
+    SHORTCUTS_SUSPENDED.store(true, Ordering::Relaxed);
+    eprintln!("[fisilti] Global kisayollar askiya alindi (duzenleme modu)");
+}
+
+#[tauri::command]
+fn resume_shortcuts() {
+    SHORTCUTS_SUSPENDED.store(false, Ordering::Relaxed);
+    eprintln!("[fisilti] Global kisayollar tekrar aktif");
+}
+
+#[tauri::command]
+fn set_overlay_bar_active(app: tauri::AppHandle, active: bool) {
     OVERLAY_BAR_ACTIVE.store(active, Ordering::Relaxed);
+    // WebView2 katmanini da kontrol et — HTTRANSPARENT tek basina yetmiyor
+    if let Some(window) = app.get_webview_window("overlay") {
+        // idle → tum pencere tamamen gecirgen (WebView2 dahil)
+        // aktif → pencere mouse olaylarini alir, WndProc + CSS hit-test yapar
+        let _ = window.set_ignore_cursor_events(!active);
+    }
 }
 
 #[tauri::command]
 fn change_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-    // Eski kisayolu oku (basarisiz olursa geri yuklemek icin)
-    let old_shortcut = {
+    // Onceki global shortcut'lari temizle (hook haric)
+    app.global_shortcut().unregister_all()
+        .map_err(|e| format!("Kisayollar kaldirilamadi: {}", e))?;
+
+    // Hook'un hedef tusunu sifirla
+    keyboard_hook::set_key(0);
+
+    if keyboard_hook::is_single_key(&shortcut) {
+        // Tek tus — hook ile yakala
+        let vk = keyboard_hook::key_name_to_vk(&shortcut)
+            .ok_or_else(|| format!("Bilinmeyen tus: {}", shortcut))?;
+        keyboard_hook::set_key(vk);
+        log::info!("Kisayol degistirildi (hook): {} (vk={:#x})", shortcut, vk);
+    } else {
+        // Modifier kombinasyonu — global shortcut ile yakala
+        register_shortcut(&app, &shortcut).map_err(|e| {
+            log::warn!("Kisayol atanamadi: {}", e);
+            format!("Gecersiz kisayol: {}", shortcut)
+        })?;
+        log::info!("Kisayol degistirildi (global): {}", shortcut);
+    }
+
+    // TTS kisayolunu tekrar kaydet (hook veya global)
+    let tts_shortcut = {
+        use tauri_plugin_store::StoreExt;
+        app.store("settings.json").ok()
+            .and_then(|store| store.get("tts_shortcut"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Ctrl+Shift+R".to_string())
+    };
+    keyboard_hook::set_tts_key(0); // Onceki TTS hook'unu temizle
+    if keyboard_hook::is_single_key(&tts_shortcut) {
+        if let Some(vk) = keyboard_hook::key_name_to_vk(&tts_shortcut) {
+            keyboard_hook::set_tts_key(vk);
+        }
+    } else {
+        register_tts_shortcut(&app, &tts_shortcut).ok();
+    }
+
+    Ok(())
+}
+
+/// Windows UI Automation ile odaklanmis uygulamadan secili metni dogrudan al
+/// Ctrl+C simülasyonuna gerek kalmadan, clipboard kirletmeden, aninda calisir
+#[cfg(target_os = "windows")]
+fn get_selected_text_uia() -> Option<String> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationTextPattern,
+        IUIAutomationTextPattern2, UIA_TextPatternId, UIA_TextPattern2Id,
+    };
+
+    unsafe {
+        // Bu thread icin COM baslat
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+
+        let result = (|| -> Option<String> {
+            // UIAutomation COM nesnesi olustur
+            let automation: IUIAutomation =
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL).ok()?;
+
+            // Odaklanmis (focused) UI elementini al
+            let element = automation.GetFocusedElement().ok()?;
+
+            // Element hakkinda bilgi logla
+            let name = element.CurrentName().unwrap_or_default();
+            let ctrl_type = element.CurrentControlType().unwrap_or_default();
+            eprintln!("[uia] Focused element: name='{}', controlType={}", name, ctrl_type.0);
+
+            // Yontem 1: TextPattern2 dene (daha modern, daha genis destek)
+            if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_TextPattern2Id) {
+                // Null pointer kontrolu — raw pointer'i kontrol et
+                let raw: *mut std::ffi::c_void = std::mem::transmute_copy(&pattern_unk);
+                if !raw.is_null() {
+                    if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern2>() {
+                        if let Ok(ranges) = text_pattern.GetSelection() {
+                            let count = ranges.Length().unwrap_or(0);
+                            if count > 0 {
+                                let mut selected = String::new();
+                                for i in 0..count {
+                                    if let Ok(range) = ranges.GetElement(i) {
+                                        if let Ok(bstr) = range.GetText(-1) {
+                                            selected.push_str(&bstr.to_string());
+                                        }
+                                    }
+                                }
+                                if !selected.trim().is_empty() {
+                                    eprintln!("[uia] TextPattern2 ile metin alindi: {} karakter", selected.len());
+                                    return Some(selected);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Yontem 2: TextPattern dene (klasik)
+            if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_TextPatternId) {
+                let raw: *mut std::ffi::c_void = std::mem::transmute_copy(&pattern_unk);
+                if !raw.is_null() {
+                    if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern>() {
+                        if let Ok(ranges) = text_pattern.GetSelection() {
+                            let count = ranges.Length().unwrap_or(0);
+                            if count > 0 {
+                                let mut selected = String::new();
+                                for i in 0..count {
+                                    if let Ok(range) = ranges.GetElement(i) {
+                                        if let Ok(bstr) = range.GetText(-1) {
+                                            selected.push_str(&bstr.to_string());
+                                        }
+                                    }
+                                }
+                                if !selected.trim().is_empty() {
+                                    eprintln!("[uia] TextPattern ile metin alindi: {} karakter", selected.len());
+                                    return Some(selected);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            eprintln!("[uia] Hicbir TextPattern desteklenmiyor");
+            None
+        })();
+
+        CoUninitialize();
+        result
+    }
+}
+
+/// TTS kisayolu tetiklendiginde secili metni alip seslendiren mantik
+/// Hem global shortcut handler'dan hem de keyboard hook'tan cagirilir
+pub(crate) fn trigger_tts_read(app: tauri::AppHandle) {
+    // Adim 1: UI Automation ile secili metni dogrudan al (anlik, clipboard kirletmez)
+    #[cfg(target_os = "windows")]
+    let uia_text = get_selected_text_uia();
+    #[cfg(not(target_os = "windows"))]
+    let uia_text: Option<String> = None;
+
+    let text = if let Some(t) = uia_text {
+        eprintln!("[tts-shortcut] UIA ile metin alindi: {} karakter", t.len());
+        t
+    } else {
+        eprintln!("[tts-shortcut] UIA basarisiz, clipboard fallback...");
+
+        // Clipboard'u temizle (eski icerigin okunmasini onle)
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            cb.set_text(String::new()).ok();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        // Adim 2: WM_COPY ile kopyala (dogrudan kontrol mesaji, daha guvenilir)
+        copy_via_wm_copy();
+
+        // Clipboard'un dolmasini bekle
+        let mut result = String::new();
+        for attempt in 0..8 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                if let Ok(txt) = cb.get_text() {
+                    if !txt.trim().is_empty() {
+                        result = txt;
+                        eprintln!("[tts-shortcut] WM_COPY: clipboard {}ms'de doldu", (attempt + 1) * 50);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Adim 3: WM_COPY basarisiz ise SendInput Ctrl+C dene
+        if result.trim().is_empty() {
+            eprintln!("[tts-shortcut] WM_COPY basarisiz, SendInput Ctrl+C deneniyor...");
+            simulate_ctrl_c();
+            for attempt in 0..8 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    if let Ok(txt) = cb.get_text() {
+                        if !txt.trim().is_empty() {
+                            result = txt;
+                            eprintln!("[tts-shortcut] SendInput: clipboard {}ms'de doldu", (attempt + 1) * 50);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    };
+
+    if text.trim().is_empty() {
+        eprintln!("[tts-shortcut] Metin alinamadi (UIA + Ctrl+C fallback bos)");
+        return;
+    }
+
+    eprintln!("[tts-shortcut] {} karakter seslendiriliyor...", text.len());
+    if let Some(window) = app.get_webview_window("main") {
+        window.emit("tts-speak-text", &text).ok();
+    }
+}
+
+fn register_tts_shortcut(app_handle: &tauri::AppHandle, shortcut: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let app = app_handle.clone();
+    app_handle.global_shortcut().on_shortcut(shortcut, move |_app, sc, event| {
+        if SHORTCUTS_SUSPENDED.load(Ordering::Relaxed) { return; }
+        if let tauri_plugin_global_shortcut::ShortcutState::Pressed = event.state {
+            log::info!("TTS kisayol basildi: {:?}", sc);
+            let app_clone = app.clone();
+            std::thread::spawn(move || {
+                trigger_tts_read(app_clone);
+            });
+        }
+    }).map_err(|e| format!("{}", e))
+}
+
+/// WM_COPY mesaji ile kopyalama — SendInput'tan daha guvenilir
+/// Dogrudan odaklanmis kontrole mesaj gonderir, klavye durumuna bagimli degil
+fn copy_via_wm_copy() -> bool {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        extern "system" {
+            fn GetForegroundWindow() -> isize;
+            fn GetFocus() -> isize;
+            fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+            fn AttachThreadInput(attach: u32, to: u32, flag: i32) -> i32;
+            fn GetCurrentThreadId() -> u32;
+            fn SendMessageW(hwnd: isize, msg: u32, wp: usize, lp: isize) -> isize;
+        }
+        const WM_COPY: u32 = 0x0301;
+
+        let fg = GetForegroundWindow();
+        if fg == 0 {
+            eprintln!("[copy] Foreground window bulunamadi");
+            return false;
+        }
+
+        let mut fg_pid: u32 = 0;
+        let fg_tid = GetWindowThreadProcessId(fg, &mut fg_pid);
+        let our_tid = GetCurrentThreadId();
+
+        // Thread input'u bagla — odaklanmis kontrolu alabilmek icin
+        let attached = if fg_tid != our_tid {
+            AttachThreadInput(our_tid, fg_tid, 1) != 0
+        } else {
+            false
+        };
+
+        let focused = GetFocus();
+
+        if attached {
+            AttachThreadInput(our_tid, fg_tid, 0); // ayir
+        }
+
+        // WM_COPY'yi odaklanmis kontrole veya ana pencereye gonder
+        let target = if focused != 0 { focused } else { fg };
+        eprintln!("[copy] WM_COPY gonderiliyor: target={}, foreground={}, focused={}", target, fg, focused);
+        SendMessageW(target, WM_COPY, 0, 0);
+        true
+    }
+    #[cfg(not(target_os = "windows"))]
+    false
+}
+
+/// SendInput ile Ctrl+C simule et (WM_COPY fallback)
+fn simulate_ctrl_c() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        extern "system" {
+            fn SendInput(count: u32, inputs: *const u8, size: i32) -> u32;
+        }
+
+        const VK_CONTROL: u16 = 0x11;
+        const VK_SHIFT: u16 = 0x10;
+        const VK_MENU: u16 = 0x12;
+        const VK_C: u16 = 0x43;
+        const KEYEVENTF_KEYUP: u32 = 0x0002;
+        const INPUT_SIZE: i32 = 40;
+
+        fn key_event(vk: u16, flags: u32) -> [u8; 40] {
+            let mut buf = [0u8; 40];
+            buf[0] = 1; // INPUT_KEYBOARD
+            buf[8] = (vk & 0xFF) as u8;
+            buf[9] = (vk >> 8) as u8;
+            buf[12] = (flags & 0xFF) as u8;
+            buf[13] = ((flags >> 8) & 0xFF) as u8;
+            buf
+        }
+
+        eprintln!("[copy] Ctrl+C simule ediliyor (SendInput fallback)...");
+
+        // Modifier tuslari birak
+        let mut release = [0u8; 120];
+        release[..40].copy_from_slice(&key_event(VK_SHIFT, KEYEVENTF_KEYUP));
+        release[40..80].copy_from_slice(&key_event(VK_CONTROL, KEYEVENTF_KEYUP));
+        release[80..120].copy_from_slice(&key_event(VK_MENU, KEYEVENTF_KEYUP));
+        SendInput(3, release.as_ptr(), INPUT_SIZE);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        // Ctrl+C gonder
+        let mut ctrl_c = [0u8; 160];
+        ctrl_c[..40].copy_from_slice(&key_event(VK_CONTROL, 0));
+        ctrl_c[40..80].copy_from_slice(&key_event(VK_C, 0));
+        ctrl_c[80..120].copy_from_slice(&key_event(VK_C, KEYEVENTF_KEYUP));
+        ctrl_c[120..160].copy_from_slice(&key_event(VK_CONTROL, KEYEVENTF_KEYUP));
+        SendInput(4, ctrl_c.as_ptr(), INPUT_SIZE);
+    }
+}
+
+fn setup_tts_shortcut(app_handle: &tauri::AppHandle) {
+    let shortcut = {
+        use tauri_plugin_store::StoreExt;
+        app_handle.store("settings.json").ok()
+            .and_then(|store| store.get("tts_shortcut"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Ctrl+Shift+R".to_string())
+    };
+
+    if keyboard_hook::is_single_key(&shortcut) {
+        // Tek tus — hook ile yakala
+        if let Some(vk) = keyboard_hook::key_name_to_vk(&shortcut) {
+            keyboard_hook::set_tts_key(vk);
+            log::info!("TTS kisayol kaydedildi (hook): {} (vk={:#x})", shortcut, vk);
+        } else {
+            log::warn!("TTS: Bilinmeyen tus: {}, varsayilan Ctrl+Shift+R'ye donuluyor", shortcut);
+            match register_tts_shortcut(app_handle, "Ctrl+Shift+R") {
+                Ok(_) => log::info!("TTS varsayilan kisayol kaydedildi: Ctrl+Shift+R"),
+                Err(e) => log::warn!("TTS varsayilan kisayol kaydedilemedi: {}", e),
+            }
+        }
+    } else {
+        // Modifier kombinasyonu — global shortcut ile yakala
+        match register_tts_shortcut(app_handle, &shortcut) {
+            Ok(_) => log::info!("TTS kisayol kaydedildi (global): {}", shortcut),
+            Err(e) => log::warn!("TTS kisayol kaydedilemedi: {}", e),
+        }
+    }
+}
+
+#[tauri::command]
+fn change_tts_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    // Mevcut ana kisayolu oku
+    let main_shortcut = {
         use tauri_plugin_store::StoreExt;
         app.store("settings.json").ok()
             .and_then(|store| store.get("shortcut"))
@@ -631,20 +1173,67 @@ fn change_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String
             .unwrap_or_else(|| "Ctrl+Shift+Space".to_string())
     };
 
-    // Tum mevcut kisayollari kaldir
+    // Global shortcut'lari temizle (hook haric)
     app.global_shortcut().unregister_all()
         .map_err(|e| format!("Kisayollar kaldirilamadi: {}", e))?;
 
-    // Yeni kisayolu kaydet, basarisiz olursa eski kisayola geri don
-    match register_shortcut(&app, &shortcut) {
-        Ok(_) => {
-            log::info!("Kisayol degistirildi: {}", shortcut);
-            Ok(())
+    // Hook'un TTS tusunu sifirla
+    keyboard_hook::set_tts_key(0);
+
+    // Ana kisayolu tekrar kaydet (hook veya global'e gore)
+    if keyboard_hook::is_single_key(&main_shortcut) {
+        if let Some(vk) = keyboard_hook::key_name_to_vk(&main_shortcut) {
+            keyboard_hook::set_key(vk);
         }
-        Err(e) => {
-            log::warn!("Yeni kisayol atanamadi ({}), eski kisayola donuluyor: {}", e, old_shortcut);
-            register_shortcut(&app, &old_shortcut).ok();
-            Err(format!("Gecersiz kisayol: {}. Gecerli ornek: Ctrl+Shift+Space, F5, Alt+A", shortcut))
+    } else {
+        register_shortcut(&app, &main_shortcut).ok();
+    }
+
+    // Yeni TTS kisayolunu kaydet
+    if keyboard_hook::is_single_key(&shortcut) {
+        let vk = keyboard_hook::key_name_to_vk(&shortcut)
+            .ok_or_else(|| format!("Bilinmeyen tus: {}", shortcut))?;
+        keyboard_hook::set_tts_key(vk);
+        log::info!("TTS kisayol degistirildi (hook): {} (vk={:#x})", shortcut, vk);
+        Ok(())
+    } else {
+        match register_tts_shortcut(&app, &shortcut) {
+            Ok(_) => {
+                log::info!("TTS kisayol degistirildi (global): {}", shortcut);
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("Yeni TTS kisayol atanamadi: {}", e);
+                Err(format!("Gecersiz kisayol: {}. Gecerli ornek: Ctrl+Shift+R, F6, Alt+R", shortcut))
+            }
         }
     }
+}
+
+// ─── Edge TTS Tauri Komutlari ───
+
+#[tauri::command]
+async fn edge_tts_get_voices() -> Result<Vec<edge_tts::EdgeVoice>, String> {
+    eprintln!("[tauri-cmd] edge_tts_get_voices cagirildi");
+    let result = edge_tts::fetch_voices().await;
+    match &result {
+        Ok(voices) => eprintln!("[tauri-cmd] {} ses donduruldu", voices.len()),
+        Err(e) => eprintln!("[tauri-cmd] Ses listesi hatasi: {}", e),
+    }
+    result
+}
+
+#[tauri::command]
+async fn edge_tts_synthesize(
+    text: String,
+    voice: String,
+    rate: f64,
+    pitch: f64,
+    volume: f64,
+) -> Result<String, String> {
+    eprintln!("[tauri-cmd] edge_tts_synthesize cagirildi: voice={}, len={}", voice, text.len());
+    let audio = edge_tts::synthesize(&text, &voice, rate, pitch, volume).await?;
+    eprintln!("[tauri-cmd] Sentez tamamlandi, {} byte audio", audio.len());
+    use base64::Engine;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&audio))
 }

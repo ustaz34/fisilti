@@ -282,6 +282,7 @@ export function ModelManager() {
         paragraph_break: current.paragraphBreak,
         notifications: current.notifications,
         log_level: current.logLevel,
+        tts_shortcut: current.ttsShortcut ?? "Ctrl+Shift+R",
       });
       await emit("settings-changed", current);
     } catch (err) {

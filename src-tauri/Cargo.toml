@@ -1,6 +1,6 @@
 [package]
 name = "fisilti"
-version = "0.1.0"
+version = "2.0.0"
 description = "Profesyonel Turkce Ses-Yazi Donusturucu"
 authors = ["hamsi"]
 edition = "2021"
@@ -39,3 +39,16 @@ whisper-rs = "0.15"
 raw-window-handle = "0.6"
 tauri-plugin-autostart = "2"
 nnnoiseless = "0.5.2"
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+base64 = "0.22"
+sha2 = "0.10"
+native-tls = "0.2"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+]

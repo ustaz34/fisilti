@@ -40,12 +40,9 @@ import {
   playErrorSound,
 } from "../lib/soundEffects";
 import {
-  startBrowserAudioMonitor,
   stopBrowserAudioMonitor,
-  getBrowserAudioLevel,
 } from "../lib/browserAudioMonitor";
 import {
-  startSileroVad,
   stopSileroVad,
 } from "../lib/sileroVadService";
 
@@ -91,12 +88,6 @@ function clearSilenceMonitor() {
  */
 function startSilenceMonitor() {
   clearSilenceMonitor();
-  const settings = useSettingsStore.getState().settings;
-  // cpal RMS: tipik konusma 0.01-0.10, sessizlik <0.005
-  // vadThreshold UI'da 0-1 arasi (0.3 = orta hassasiyet)
-  // Dogru olcekleme: 0.3 → 0.008 (yumusak konusmayı da yakala)
-  const threshold = Math.max((settings.vadThreshold || 0.3) * 0.025, 0.003);
-  const silenceTimeoutMs = getSilenceTimeoutMs();
   const minSpeechBeforeStop = 1500;
   const noSpeechTimeoutMs = 10000;
 
@@ -106,12 +97,25 @@ function startSilenceMonitor() {
       return;
     }
 
+    // Threshold ve timeout'u her iterasyonda dinamik oku
+    const curSettings = useSettingsStore.getState().settings;
+    // Konusma baslama esigi: kullanicinin hassasiyet ayari (dusuk = hassas)
+    const speechThreshold = Math.max((curSettings.vadThreshold || 0.3) * 0.025, 0.003);
+    // Sessizlik esigi: konusma esiginden bagimsiz minimum taban
+    // Arka plan gurultusu (0.003-0.005) sessizlik zamanlayicisini resetlemesin
+    const silenceFloor = Math.max(speechThreshold, 0.006);
+    const silenceTimeoutMs = getSilenceTimeoutMs();
+
     try {
       const level = await getAudioLevels();
 
-      if (level >= threshold) {
-        silenceStartTime = 0;
+      // Konusma algilama: hassas esik
+      if (level >= speechThreshold) {
         hasDetectedSpeech = true;
+      }
+      // Sessizlik zamanlayici: sadece gercek ses (silenceFloor ustu) resetler
+      if (level >= silenceFloor) {
+        silenceStartTime = 0;
       } else if (hasDetectedSpeech) {
         if (silenceStartTime === 0) {
           silenceStartTime = Date.now();
@@ -132,109 +136,6 @@ function startSilenceMonitor() {
       }
     } catch {
       // Ses seviyesi okunamazsa devam et
-    }
-  }, 200);
-}
-
-/**
- * Web Speech (Google) icin tarayici tarafli sessizlik izleme.
- * Browser AudioContext + AnalyserNode ile ses seviyesini olcer,
- * VAD esigine gore sessizlik algiliyor.
- */
-async function startBrowserSilenceMonitor() {
-  clearSilenceMonitor();
-  const settings = useSettingsStore.getState().settings;
-  const silenceTimeoutMs = getSilenceTimeoutMs();
-  const minSpeechBeforeStop = 1500;
-
-  // Silero VAD'i dene — basarili olursa cok daha dogru konusma algilama
-  let sileroSpeechActive = false;
-  let sileroSpeechEndTime = 0;
-  const sileroOk = await startSileroVad(
-    () => {
-      // Konusma basladi
-      sileroSpeechActive = true;
-      hasDetectedSpeech = true;
-      silenceStartTime = 0;
-    },
-    () => {
-      // Konusma bitti
-      sileroSpeechActive = false;
-      sileroSpeechEndTime = Date.now();
-    },
-  );
-
-  if (sileroOk) {
-    // Silero VAD aktif — sessizlik timeout'unu Silero eventleri ile kontrol et
-    silenceMonitorTimer = setInterval(() => {
-      if (!isActive) {
-        clearSilenceMonitor();
-        return;
-      }
-
-      if (sileroSpeechActive) {
-        silenceStartTime = 0;
-        return;
-      }
-
-      // Konusma algilandi ve simdi sessizlik var
-      if (hasDetectedSpeech && sileroSpeechEndTime > 0) {
-        const elapsed = Date.now() - recordingStartTime;
-        const silenceDuration = Date.now() - sileroSpeechEndTime;
-
-        if (elapsed > minSpeechBeforeStop && silenceDuration >= silenceTimeoutMs) {
-          clearSilenceMonitor();
-          doForceStop();
-        }
-      }
-
-      // Hic konusma algilanmadiysa 10sn sonra durdur
-      if (!hasDetectedSpeech) {
-        const elapsed = Date.now() - recordingStartTime;
-        if (elapsed > 10000) {
-          clearSilenceMonitor();
-          doForceStop();
-        }
-      }
-    }, 200);
-    return;
-  }
-
-  // Silero basarisiz — frekans-tabanli VAD fallback
-  // Frekans-bandi RMS: konusma ~0.005-0.05, sessizlik <0.002
-  const threshold = Math.max((settings.vadThreshold || 0.3) * 0.015, 0.002);
-  const noSpeechTimeoutMs = 10000;
-  const deviceId = settings.selectedDevice ?? undefined;
-  await startBrowserAudioMonitor(deviceId);
-
-  silenceMonitorTimer = setInterval(() => {
-    if (!isActive) {
-      clearSilenceMonitor();
-      return;
-    }
-
-    const level = getBrowserAudioLevel();
-
-    if (level >= threshold) {
-      silenceStartTime = 0;
-      hasDetectedSpeech = true;
-    } else if (hasDetectedSpeech) {
-      if (silenceStartTime === 0) {
-        silenceStartTime = Date.now();
-      }
-      const elapsed = Date.now() - recordingStartTime;
-      const silenceDuration = Date.now() - silenceStartTime;
-
-      if (elapsed > minSpeechBeforeStop && silenceDuration >= silenceTimeoutMs) {
-        clearSilenceMonitor();
-        doForceStop();
-      }
-    } else {
-      const elapsed = Date.now() - recordingStartTime;
-      if (elapsed > noSpeechTimeoutMs) {
-        clearSilenceMonitor();
-        doForceStop();
-      }
     }
   }, 200);
 }
@@ -336,8 +237,8 @@ function restartWakeWordIfEnabled() {
   const settings = useSettingsStore.getState().settings;
   if (settings.voiceActivation) {
     setTimeout(() => {
-      startWakeWordListener("tr", handleWakeWord, settings.wakeWord, wakeWordStatusCallback);
-    }, 300); // Kisa bekleme, SpeechRecognition cakismasi onlemi
+      startWakeWordListener(settings.language, handleWakeWord, settings.wakeWord, wakeWordStatusCallback);
+    }, 500); // 300ms -> 500ms: SpeechRecognition abort async — cakismayi onle
   }
 }
 
@@ -513,8 +414,10 @@ function handleWakeWord() {
         },
         { autoStopAfterSilenceMs: getSilenceTimeoutMs() },
       );
-      startBrowserSilenceMonitor();
-    }, 100);
+      // NOT: startBrowserSilenceMonitor() KALDIRILDI — webSpeechService'deki
+      // dahili autoStopAfterSilenceMs yeterli. Cift monitor cakisiyordu:
+      // harici doForceStop() smart restart zincirini kiriyordu.
+    }, 200);
   } else if (engine === "deepgram") {
     const apiKey = settings.deepgramApiKey;
     const lang = settings.language;
@@ -545,8 +448,8 @@ function handleWakeWord() {
           }
         },
       });
-      startBrowserSilenceMonitor();
-    }, 100);
+      // Deepgram kendi sessizlik algilamasini yapar — harici monitor gereksiz
+    }, 200);
   } else if (engine === "azure") {
     const key = settings.azureSpeechKey;
     const region = settings.azureSpeechRegion;
@@ -678,6 +581,8 @@ export function useTranscription() {
         }
 
         const lang = useSettingsStore.getState().settings.language;
+        // Push-to-talk/buton modu: sessizlik izleme YOK — kullanici birakinca durur
+        // noAutoRestart: oturum restart'ini engelle — kisa kelimelerin kaybolmasini onler
         startWebSpeech(lang, {
           onInterimResult: (text) => {
             useTranscriptionStore.getState().setCurrentText(text);
@@ -705,8 +610,7 @@ export function useTranscription() {
               });
             }
           },
-        }, { autoStopAfterSilenceMs: getSilenceTimeoutMs() });
-        startBrowserSilenceMonitor();
+        }, { noAutoRestart: true });
       } else if (engine === "deepgram") {
         const s = useSettingsStore.getState().settings;
         if (!s.deepgramApiKey) throw new Error("Deepgram API key girilmemis");
@@ -736,7 +640,7 @@ export function useTranscription() {
             }
           },
         });
-        startBrowserSilenceMonitor();
+        // Push-to-talk: sessizlik izleme yok
       } else if (engine === "azure") {
         const s = useSettingsStore.getState().settings;
         if (!s.azureSpeechKey || !s.azureSpeechRegion) throw new Error("Azure Speech key veya region girilmemis");
@@ -891,7 +795,7 @@ export function useTranscription() {
   const startVoiceActivation = useCallback(() => {
     const settings = useSettingsStore.getState().settings;
     if (!isActive) {
-      startWakeWordListener("tr", handleWakeWord, settings.wakeWord, wakeWordStatusCallback);
+      startWakeWordListener(settings.language, handleWakeWord, settings.wakeWord, wakeWordStatusCallback);
     }
   }, []);
 

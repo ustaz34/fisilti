@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { OverlayBar } from "./components/OverlayBar";
 import { useSettingsStore, type AppSettings } from "./stores/settingsStore";
 import { useRecordingStore } from "./stores/recordingStore";
+import { useTTSStore } from "./stores/ttsStore";
 import { getAudioLevels, getSettings } from "./lib/tauri-commands";
 import { useTranscription } from "./hooks/useTranscription";
 import { updateWakeWord } from "./lib/wakeWordListener";
@@ -58,6 +59,7 @@ function App() {
           paragraphBreak: saved.paragraph_break ?? false,
           notifications: saved.notifications ?? true,
           logLevel: saved.log_level ?? "info",
+          ttsShortcut: saved.tts_shortcut ?? "Ctrl+Shift+R",
         });
       })
       .catch(console.error);
@@ -80,7 +82,7 @@ function App() {
       stopVoiceActivation();
       const timer = setTimeout(() => {
         startVoiceActivation();
-      }, 200);
+      }, 500); // 200ms -> 500ms: SpeechRecognition abort async — eski oturumun tamamen bitmesini bekle
       return () => clearTimeout(timer);
     } else {
       stopVoiceActivation();
@@ -125,6 +127,23 @@ function App() {
       if (minDurationTimer) clearTimeout(minDurationTimer);
     };
   }, [doStart, doStop]);
+
+  // TTS: tts-status-changed event'ini dinle (main window'dan senkronize)
+  useEffect(() => {
+    const unlisten = listen<{ status: string; text?: string; charIndex?: number; totalChars?: number }>("tts-status-changed", (event) => {
+      const { status, text, charIndex, totalChars } = event.payload;
+      const store = useTTSStore.getState();
+      store.setStatus(status as "idle" | "loading" | "speaking" | "paused");
+      if (text !== undefined) store.setPreviewText(text);
+      if (charIndex !== undefined && totalChars !== undefined) store.setProgress(charIndex, totalChars);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // NOT: TTS speak event'leri sadece SettingsApp (main window) tarafinda dinlenir
+  // Overlay sadece tts-status-changed ile durum gunceller, speak tetiklemez
 
   // Kayit sirasinda ses seviyesini sorgula (sadece whisper modunda)
   useEffect(() => {

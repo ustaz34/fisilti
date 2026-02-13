@@ -25,6 +25,7 @@ function toBackend(s: AppSettings) {
     preserve_english_words: s.preserveEnglishWords, auto_comma: s.autoComma,
     paragraph_break: s.paragraphBreak,
     notifications: s.notifications, log_level: s.logLevel,
+    tts_shortcut: s.ttsShortcut ?? "Ctrl+Shift+R",
   };
 }
 

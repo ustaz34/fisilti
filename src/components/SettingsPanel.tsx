@@ -8,6 +8,7 @@ import {
   setOverlayFollowCursor,
   type AudioDevice,
 } from "../lib/tauri-commands";
+import { invoke } from "@tauri-apps/api/core";
 
 /* ════════════════════════════════════════
    Helpers — untouched business logic
@@ -43,6 +44,7 @@ function toBackend(s: AppSettings) {
     preserve_english_words: s.preserveEnglishWords, auto_comma: s.autoComma,
     paragraph_break: s.paragraphBreak,
     notifications: s.notifications, log_level: s.logLevel,
+    tts_shortcut: s.ttsShortcut ?? "Ctrl+Shift+R",
   };
 }
 
@@ -258,24 +260,48 @@ function EngineCard({ active, title, desc, icon, onClick }: {
 function ShortcutChip({ value, onChange }: { value: string; onChange: (s: string) => void }) {
   const [rec, setRec] = useState(false);
 
+  // Browser key → Tauri/Hook formatina cevir
+  const keyToName = (key: string): string | null => {
+    const map: Record<string, string> = {
+      " ": "Space", "ArrowUp": "Up", "ArrowDown": "Down",
+      "ArrowLeft": "Left", "ArrowRight": "Right",
+      "Backspace": "Backspace", "Delete": "Delete",
+      "Enter": "Enter", "Tab": "Tab",
+      "Home": "Home", "End": "End", "PageUp": "PageUp", "PageDown": "PageDown",
+      "Insert": "Insert", "CapsLock": "CapsLock", "NumLock": "NumLock",
+      "ScrollLock": "ScrollLock", "Pause": "Pause", "PrintScreen": "PrintScreen",
+      "ContextMenu": "ContextMenu",
+    };
+    if (map[key]) return map[key];
+    if (/^F\d{1,2}$/.test(key)) return key;
+    if (key.length === 1) return key.toUpperCase();
+    return null;
+  };
+
   const onKey = (e: React.KeyboardEvent) => {
     if (!rec) return;
     e.preventDefault();
-    if (e.key === "Escape") { setRec(false); return; }
-    const mods = [];
+    e.stopPropagation();
+
+    if (e.key === "Escape") { setRec(false); invoke("resume_shortcuts"); return; }
+    if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return;
+
+    const mods: string[] = [];
     if (e.ctrlKey) mods.push("Ctrl");
     if (e.altKey) mods.push("Alt");
     if (e.shiftKey) mods.push("Shift");
-    if (["Control","Shift","Alt"].includes(e.key)) return;
-    let key = e.key.toUpperCase().replace("ARROW","");
-    if (key === " ") key = "Space";
-    onChange([...mods, key].join("+"));
+
+    const keyName = keyToName(e.key);
+    if (!keyName) return;
+
+    onChange([...mods, keyName].join("+"));
     setRec(false);
+    invoke("resume_shortcuts");
   };
 
   if (rec) {
     return (
-      <button onKeyDown={onKey} onBlur={() => setRec(false)} autoFocus className="sp-shortcut sp-shortcut--rec">
+      <button onKeyDown={onKey} onBlur={() => { setRec(false); invoke("resume_shortcuts"); }} autoFocus className="sp-shortcut sp-shortcut--rec">
         <span className="sp-shortcut-pulse" />
         Tusa basin...
       </button>
@@ -283,7 +309,7 @@ function ShortcutChip({ value, onChange }: { value: string; onChange: (s: string
   }
 
   return (
-    <button onClick={() => setRec(true)} className="sp-shortcut">
+    <button onClick={() => { setRec(true); invoke("suspend_shortcuts"); }} className="sp-shortcut">
       {value.split("+").map((k, i) => (
         <kbd key={i} className="sp-kbd">{k}</kbd>
       ))}

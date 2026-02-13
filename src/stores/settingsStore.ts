@@ -30,6 +30,7 @@ export interface AppSettings {
   paragraphBreak: boolean;
   notifications: boolean;
   logLevel: string;
+  ttsShortcut: string;
 }
 
 export type WakeWordStatus =
@@ -82,6 +83,7 @@ const defaultSettings: AppSettings = {
   paragraphBreak: false,
   notifications: true,
   logLevel: "info",
+  ttsShortcut: "Ctrl+Shift+R",
 };
 
 export const useSettingsStore = create<SettingsState>((set) => ({
