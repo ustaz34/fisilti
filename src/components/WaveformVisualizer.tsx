@@ -16,9 +16,13 @@ export function WaveformVisualizer() {
 
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
+    const targetW = rect.width * dpr;
+    const targetH = rect.height * dpr;
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+      ctx.scale(dpr, dpr);
+    }
 
     const width = rect.width;
     const height = rect.height;

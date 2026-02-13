@@ -143,7 +143,7 @@ function startSession(language: string, onWakeWord: () => void) {
           recognition = null;
           // Safety timeout: if onend doesn't fire within 500ms, call callback anyway
           setTimeout(() => {
-            if (pendingWakeWordCallback) {
+            if (pendingWakeWordCallback && mySession === sessionCounter) {
               const cb = pendingWakeWordCallback;
               pendingWakeWordCallback = null;
               cb();

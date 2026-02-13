@@ -135,7 +135,7 @@ export function WaveLine({ status, waveformStyle = "classic" }: WaveLineProps) {
       ctx.strokeStyle = color;
       ctx.lineWidth = lineW;
 
-      for (let x = 0; x <= width; x += 1.5) {
+      for (let x = 0; x <= width; x += 2) {
         const t = x / width;
         const envelope = edgeFade(t);
         const bandMod = bandInfluence[0] * sBands[0] + bandInfluence[1] * sBands[1]
@@ -178,7 +178,7 @@ export function WaveLine({ status, waveformStyle = "classic" }: WaveLineProps) {
       ctx.beginPath();
       ctx.strokeStyle = accentRgba(0.7);
       ctx.lineWidth = 1.5;
-      for (let x = 0; x <= width; x++) {
+      for (let x = 0; x <= width; x += 2) {
         const t = x / width;
         const envelope = edgeFade(t);
         const y = centerY + Math.sin(t * Math.PI * 6 - phaseRef.current * 4) * 3.5 * envelope;
@@ -259,6 +259,10 @@ export function WaveLine({ status, waveformStyle = "classic" }: WaveLineProps) {
       const gap = 1.5;
       const sliceW = (width - gap * (slices - 1)) / slices;
 
+      // Gradient renkleri onceden hesapla (her frame icin sabit)
+      const upColors = [accentRgba(0.6), accentRgba(0.35), accentRgba(0.1)];
+      const dnColors = [accentRgba(0.35), accentRgba(0.15), accentRgba(0.03)];
+
       for (let i = 0; i < slices; i++) {
         const t = i / (slices - 1);
         const envelope = edgeFade(t);
@@ -278,9 +282,9 @@ export function WaveLine({ status, waveformStyle = "classic" }: WaveLineProps) {
 
         // Ust yari — gradient dolgu
         const gradUp = ctx.createLinearGradient(x, centerY, x, centerY - clampedH);
-        gradUp.addColorStop(0, accentRgba(0.6));
-        gradUp.addColorStop(0.6, accentRgba(0.35));
-        gradUp.addColorStop(1, accentRgba(0.1));
+        gradUp.addColorStop(0, upColors[0]);
+        gradUp.addColorStop(0.6, upColors[1]);
+        gradUp.addColorStop(1, upColors[2]);
         ctx.fillStyle = gradUp;
         ctx.beginPath();
         ctx.roundRect(x, centerY - clampedH, sliceW, clampedH, 1);
@@ -288,9 +292,9 @@ export function WaveLine({ status, waveformStyle = "classic" }: WaveLineProps) {
 
         // Alt yari — daha soluk ayna
         const gradDn = ctx.createLinearGradient(x, centerY, x, centerY + clampedH);
-        gradDn.addColorStop(0, accentRgba(0.35));
-        gradDn.addColorStop(0.6, accentRgba(0.15));
-        gradDn.addColorStop(1, accentRgba(0.03));
+        gradDn.addColorStop(0, dnColors[0]);
+        gradDn.addColorStop(0.6, dnColors[1]);
+        gradDn.addColorStop(1, dnColors[2]);
         ctx.fillStyle = gradDn;
         ctx.beginPath();
         ctx.roundRect(x, centerY, sliceW, clampedH, 1);
@@ -361,14 +365,9 @@ export function WaveLine({ status, waveformStyle = "classic" }: WaveLineProps) {
         const x = (i + 1) * spacing;
         const y = centerY + bounce;
 
-        const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
-        grad.addColorStop(0, accentRgba(0.9));
-        grad.addColorStop(0.6, accentRgba(0.5));
-        grad.addColorStop(1, accentRgba(0.0));
-
         ctx.beginPath();
         ctx.arc(x, y, Math.max(radius, 0.5), 0, Math.PI * 2);
-        ctx.fillStyle = grad;
+        ctx.fillStyle = accentRgba(0.6 * envelope);
         ctx.fill();
       }
       ctx.shadowBlur = 0;
@@ -417,7 +416,7 @@ export function WaveLine({ status, waveformStyle = "classic" }: WaveLineProps) {
       ctx.beginPath();
       ctx.moveTo(0, centerY);
 
-      for (let x = 0; x <= width; x += 1.5) {
+      for (let x = 0; x <= width; x += 2) {
         const t = x / width;
         const envelope = edgeFade(t);
         const bandMod = 0.4 * sBands[0] + 0.35 * sBands[1] + 0.2 * sBands[2] + 0.05 * sBands[3];
@@ -444,7 +443,7 @@ export function WaveLine({ status, waveformStyle = "classic" }: WaveLineProps) {
 
       // Ust kenar cizgisi
       ctx.beginPath();
-      for (let x = 0; x <= width; x += 1.5) {
+      for (let x = 0; x <= width; x += 2) {
         const t = x / width;
         const envelope = edgeFade(t);
         const bandMod = 0.4 * sBands[0] + 0.35 * sBands[1] + 0.2 * sBands[2] + 0.05 * sBands[3];
@@ -466,7 +465,7 @@ export function WaveLine({ status, waveformStyle = "classic" }: WaveLineProps) {
       ctx.shadowBlur = 6;
       ctx.shadowColor = accentRgba(0.2);
 
-      const particleCount = 60;
+      const particleCount = 40;
 
       for (let i = 0; i < particleCount; i++) {
         const t = i / particleCount;
@@ -587,14 +586,9 @@ export function WaveLine({ status, waveformStyle = "classic" }: WaveLineProps) {
         ctx.stroke();
 
         // Donen nokta
-        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, dotRadius);
-        grad.addColorStop(0, accentRgba(0.9));
-        grad.addColorStop(0.7, accentRgba(0.4));
-        grad.addColorStop(1, accentRgba(0.0));
-
         ctx.beginPath();
         ctx.arc(cx, cy, Math.max(dotRadius, 0.5), 0, Math.PI * 2);
-        ctx.fillStyle = grad;
+        ctx.fillStyle = accentRgba(0.7 * envelope);
         ctx.fill();
       }
       ctx.shadowBlur = 0;

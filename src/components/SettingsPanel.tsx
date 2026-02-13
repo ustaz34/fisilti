@@ -327,13 +327,11 @@ export function SettingsPanel() {
 
   useEffect(() => { listAudioDevices().then(setDevices).catch(console.error); }, []);
 
-  const save = (partial: Partial<AppSettings>) => {
+  const save = async (partial: Partial<AppSettings>) => {
     updateSettings(partial);
-    setTimeout(async () => {
-      const cur = useSettingsStore.getState().settings;
-      try { await saveSettings(toBackend(cur)); await emit("settings-changed", cur); }
-      catch (e) { console.error("Save error:", e); }
-    }, 0);
+    const cur = useSettingsStore.getState().settings;
+    try { await saveSettings(toBackend(cur)); await emit("settings-changed", cur); }
+    catch (e) { console.error("Save error:", e); }
   };
 
   const engine = settings.transcriptionEngine;

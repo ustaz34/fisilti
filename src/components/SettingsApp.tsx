@@ -182,12 +182,25 @@ export function SettingsApp() {
         console.error("TTS pano okuma hatasi:", e);
       }
     });
-    // tts-speak-text: yeni format (metin dogrudan Rust'tan gelir)
-    const unlisten2 = listen<string>("tts-speak-text", (event) => {
-      const text = event.payload;
-      if (text && text.trim()) {
-        getTTSService().speak(text);
+    // tts-speak-text: metin dogrudan Rust'tan gelir (string veya {text, readAlong, readAlongSupported} objesi)
+    const unlisten2 = listen<string | { text: string; readAlong?: boolean; readAlongSupported?: boolean }>("tts-speak-text", async (event) => {
+      let text: string;
+      let readAlong = false;
+      let readAlongSupported = false;
+      if (typeof event.payload === "string") {
+        text = event.payload;
+      } else {
+        text = event.payload.text;
+        readAlong = event.payload.readAlong ?? false;
+        readAlongSupported = event.payload.readAlongSupported ?? false;
       }
+      if (!text || !text.trim()) return;
+
+      // UIA init Rust tarafinda yapildi (fokus kaynak uygulamadayken)
+      if (readAlong) {
+        useTTSStore.getState().setReadAlongSupported(readAlongSupported);
+      }
+      getTTSService().speak(text, readAlong);
     });
     return () => {
       unlisten1.then((fn) => fn());

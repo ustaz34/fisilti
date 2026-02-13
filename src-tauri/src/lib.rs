@@ -7,7 +7,9 @@ mod model;
 mod settings;
 mod text;
 mod transcription;
+mod uia_highlight;
 
+use serde::Serialize;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -25,6 +27,10 @@ static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static OVERLAY_FOLLOW_CURSOR: AtomicBool = AtomicBool::new(true);
 /// Overlay bar'in aktif durumu (recording veya transcribing = true)
 static OVERLAY_BAR_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Overlay bar'in aktif durumdaki genisligi (fiziksel piksel, frontend'den gonderilir)
+static OVERLAY_BAR_WIDTH: AtomicIsize = AtomicIsize::new(0);
+/// Overlay bar'in aktif durumdaki yuksekligi (fiziksel piksel, frontend'den gonderilir)
+static OVERLAY_BAR_HEIGHT: AtomicIsize = AtomicIsize::new(0);
 /// Kisayol duzenleme modu — true iken global kisayollar askiya alinir
 pub(crate) static SHORTCUTS_SUSPENDED: AtomicBool = AtomicBool::new(false);
 
@@ -220,6 +226,10 @@ pub fn run() {
             resume_shortcuts,
             edge_tts_get_voices,
             edge_tts_synthesize,
+            edge_tts_synthesize_with_boundaries,
+            uia_init_read_along,
+            uia_highlight_word,
+            uia_stop_read_along,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri uygulamasi baslatilirken hata olustu");
@@ -535,6 +545,13 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
             }
 
             if msg == WM_NCHITTEST {
+                let is_active = OVERLAY_BAR_ACTIVE.load(Ordering::Relaxed);
+
+                // Idle: tum pencere tamamen gecirgen — taskbar tiklamalari engellenmez
+                if !is_active {
+                    return HTTRANSPARENT;
+                }
+
                 // Imleç konumunu client koordinatlarina cevir
                 let sx = (lp & 0xFFFF) as i16 as i32;
                 let sy = ((lp >> 16) & 0xFFFF) as i16 as i32;
@@ -550,27 +567,36 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
                     return HTTRANSPARENT;
                 }
 
-                // Oransal konum (0.0 - 1.0)
-                let rx = pt[0] as f64 / cw as f64;
-                let ry = pt[1] as f64 / ch as f64;
+                // Frontend'den gelen piksel-doğru bar boyutlarini oku
+                let bar_w = OVERLAY_BAR_WIDTH.load(Ordering::Relaxed) as i32;
+                let bar_h = OVERLAY_BAR_HEIGHT.load(Ordering::Relaxed) as i32;
 
-                let is_active = OVERLAY_BAR_ACTIVE.load(Ordering::Relaxed);
+                if bar_w > 0 && bar_h > 0 {
+                    // Piksel-doğru hit-test: bar ortalanmis, alta yapısık
+                    let bar_left = (cw - bar_w) / 2;
+                    let bar_right = bar_left + bar_w;
+                    let bar_top = ch - bar_h;
 
-                // Idle: tum pencere tamamen gecirgen — taskbar tiklamalari engellenmez
-                if !is_active {
-                    return HTTRANSPARENT;
-                }
+                    if pt[0] >= bar_left && pt[0] <= bar_right && pt[1] >= bar_top {
+                        let orig = ORIGINAL_WNDPROC.load(Ordering::Acquire);
+                        if orig != 0 {
+                            return CallWindowProcW(orig, hwnd, msg, wp, lp);
+                        } else {
+                            return DefWindowProcW(hwnd, msg, wp, lp);
+                        }
+                    }
+                } else {
+                    // Fallback: boyut bilgisi yoksa oransal hesapla
+                    let rx = pt[0] as f64 / cw as f64;
+                    let ry = pt[1] as f64 / ch as f64;
 
-                // Aktif (kayit/donusum): sadece bar gorselinin oldugu dar alan
-                // center %50, bottom %60 — kenarlar gecirgen kalir
-                let (x_min, x_max, y_min) = (0.25, 0.75, 0.40);
-
-                if rx >= x_min && rx <= x_max && ry >= y_min {
-                    let orig = ORIGINAL_WNDPROC.load(Ordering::Acquire);
-                    if orig != 0 {
-                        return CallWindowProcW(orig, hwnd, msg, wp, lp);
-                    } else {
-                        return DefWindowProcW(hwnd, msg, wp, lp);
+                    if rx >= 0.15 && rx <= 0.85 && ry >= 0.30 {
+                        let orig = ORIGINAL_WNDPROC.load(Ordering::Acquire);
+                        if orig != 0 {
+                            return CallWindowProcW(orig, hwnd, msg, wp, lp);
+                        } else {
+                            return DefWindowProcW(hwnd, msg, wp, lp);
+                        }
                     }
                 }
 
@@ -806,8 +832,19 @@ fn resume_shortcuts() {
 }
 
 #[tauri::command]
-fn set_overlay_bar_active(app: tauri::AppHandle, active: bool) {
+fn set_overlay_bar_active(app: tauri::AppHandle, active: bool, width: Option<f64>, height: Option<f64>) {
     OVERLAY_BAR_ACTIVE.store(active, Ordering::Relaxed);
+    // Frontend'den gelen piksel boyutlarini kaydet (DPI-aware hit-test icin)
+    if let Some(w) = width {
+        OVERLAY_BAR_WIDTH.store(w as isize, Ordering::Relaxed);
+    }
+    if let Some(h) = height {
+        OVERLAY_BAR_HEIGHT.store(h as isize, Ordering::Relaxed);
+    }
+    if !active {
+        OVERLAY_BAR_WIDTH.store(0, Ordering::Relaxed);
+        OVERLAY_BAR_HEIGHT.store(0, Ordering::Relaxed);
+    }
     // WebView2 katmanini da kontrol et — HTTRANSPARENT tek basina yetmiyor
     if let Some(window) = app.get_webview_window("overlay") {
         // idle → tum pencere tamamen gecirgen (WebView2 dahil)
@@ -1019,9 +1056,20 @@ pub(crate) fn trigger_tts_read(app: tauri::AppHandle) {
         return;
     }
 
+    // Foreground pencereyi kaydet (UIA read-along icin gerekli)
+    commands::input::save_foreground_internal();
+
+    // UIA read-along'u SIMDI baslat — fokus hala kaynak uygulamada
+    let uia_supported = uia_highlight::init_read_along();
+    eprintln!("[tts-shortcut] UIA read-along: supported={}", uia_supported);
+
     eprintln!("[tts-shortcut] {} karakter seslendiriliyor...", text.len());
     if let Some(window) = app.get_webview_window("main") {
-        window.emit("tts-speak-text", &text).ok();
+        window.emit("tts-speak-text", serde_json::json!({
+            "text": &text,
+            "readAlong": true,
+            "readAlongSupported": uia_supported
+        })).ok();
     }
 }
 
@@ -1240,4 +1288,45 @@ async fn edge_tts_synthesize(
     eprintln!("[tauri-cmd] Sentez tamamlandi, {} byte audio", audio.len());
     use base64::Engine;
     Ok(base64::engine::general_purpose::STANDARD.encode(&audio))
+}
+
+#[derive(Serialize)]
+struct EdgeTTSSynthResult {
+    audio_base64: String,
+    word_boundaries: Vec<edge_tts::WordBoundary>,
+}
+
+#[tauri::command]
+async fn edge_tts_synthesize_with_boundaries(
+    text: String,
+    voice: String,
+    rate: f64,
+    pitch: f64,
+    volume: f64,
+) -> Result<EdgeTTSSynthResult, String> {
+    eprintln!("[tauri-cmd] edge_tts_synthesize_with_boundaries cagirildi: voice={}, len={}", voice, text.len());
+    let (audio, boundaries) = edge_tts::synthesize_with_boundaries(&text, &voice, rate, pitch, volume).await?;
+    eprintln!("[tauri-cmd] Sentez tamamlandi, {} byte audio, {} boundary", audio.len(), boundaries.len());
+    use base64::Engine;
+    Ok(EdgeTTSSynthResult {
+        audio_base64: base64::engine::general_purpose::STANDARD.encode(&audio),
+        word_boundaries: boundaries,
+    })
+}
+
+// ─── UIA Read-Along Tauri Komutlari ───
+
+#[tauri::command]
+fn uia_init_read_along() -> bool {
+    uia_highlight::init_read_along()
+}
+
+#[tauri::command]
+fn uia_highlight_word(char_offset: u32, char_length: u32) {
+    uia_highlight::highlight_word(char_offset, char_length);
+}
+
+#[tauri::command]
+fn uia_stop_read_along() {
+    uia_highlight::stop_read_along();
 }

@@ -12,6 +12,9 @@ export const TTS_LANGUAGES: { id: TTSLanguage; name: string; flag: string; testT
   { id: "ru", name: "Русский", flag: "🇷🇺", testText: "Привет, это тест голоса." },
 ];
 
+export type ReadAlongMode = "off" | "source" | "overlay" | "both";
+export type ReadAlongGranularity = "word" | "sentence";
+
 export interface TTSSettings {
   engine: TTSEngine;
   language: TTSLanguage;
@@ -19,6 +22,8 @@ export interface TTSSettings {
   rate: number;
   pitch: number;
   volume: number;
+  readAlongMode: ReadAlongMode;
+  readAlongGranularity: ReadAlongGranularity;
 }
 
 export interface TTSVoice {
@@ -40,6 +45,11 @@ interface TTSState {
   // Edge TTS sesleri
   edgeVoices: EdgeVoice[];
   edgeTurkishVoices: EdgeVoice[];
+  // Read-along takip
+  currentWord: string;
+  currentWordOffset: number;
+  currentWordLength: number;
+  readAlongSupported: boolean;
   setStatus: (status: TTSStatus) => void;
   setCurrentText: (text: string) => void;
   setPreviewText: (text: string) => void;
@@ -47,6 +57,8 @@ interface TTSState {
   updateTTSSettings: (partial: Partial<TTSSettings>) => void;
   setVoices: (voices: TTSVoice[], turkishVoices: TTSVoice[]) => void;
   setEdgeVoices: (voices: EdgeVoice[], turkishVoices: EdgeVoice[]) => void;
+  setCurrentWord: (word: string, offset: number, length: number) => void;
+  setReadAlongSupported: (supported: boolean) => void;
   reset: () => void;
 }
 
@@ -57,6 +69,8 @@ const defaultTTSSettings: TTSSettings = {
   rate: 1.0,
   pitch: 1.0,
   volume: 1.0,
+  readAlongMode: "source",
+  readAlongGranularity: "word",
 };
 
 export const useTTSStore = create<TTSState>((set) => ({
@@ -70,6 +84,10 @@ export const useTTSStore = create<TTSState>((set) => ({
   turkishVoices: [],
   edgeVoices: [],
   edgeTurkishVoices: [],
+  currentWord: "",
+  currentWordOffset: 0,
+  currentWordLength: 0,
+  readAlongSupported: false,
   setStatus: (status) => set({ status }),
   setCurrentText: (text) => set({ currentText: text, previewText: text.length > 60 ? text.slice(0, 57) + "..." : text, totalChars: text.length, charIndex: 0 }),
   setPreviewText: (text) => set({ previewText: text }),
@@ -80,7 +98,9 @@ export const useTTSStore = create<TTSState>((set) => ({
     })),
   setVoices: (voices, turkishVoices) => set({ voices, turkishVoices }),
   setEdgeVoices: (voices, turkishVoices) => set({ edgeVoices: voices, edgeTurkishVoices: turkishVoices }),
-  reset: () => set({ status: "idle", currentText: "", previewText: "", charIndex: 0, totalChars: 0 }),
+  setCurrentWord: (word, offset, length) => set({ currentWord: word, currentWordOffset: offset, currentWordLength: length }),
+  setReadAlongSupported: (supported) => set({ readAlongSupported: supported }),
+  reset: () => set({ status: "idle", currentText: "", previewText: "", charIndex: 0, totalChars: 0, currentWord: "", currentWordOffset: 0, currentWordLength: 0 }),
 }));
 
 // Kalicilik: tts-settings.json'a kaydet/yukle
@@ -97,6 +117,8 @@ export async function loadTTSSettings() {
     const rate = await store.get<number>("rate");
     const pitch = await store.get<number>("pitch");
     const volume = await store.get<number>("volume");
+    const readAlongMode = await store.get<string>("readAlongMode");
+    const readAlongGranularity = await store.get<string>("readAlongGranularity");
     const partial: Partial<TTSSettings> = {};
     if (engine === "browser" || engine === "edge") partial.engine = engine;
     if (language === "tr" || language === "ar" || language === "en" || language === "ru") partial.language = language;
@@ -104,6 +126,8 @@ export async function loadTTSSettings() {
     if (rate != null) partial.rate = rate;
     if (pitch != null) partial.pitch = pitch;
     if (volume != null) partial.volume = volume;
+    if (readAlongMode === "off" || readAlongMode === "source" || readAlongMode === "overlay" || readAlongMode === "both") partial.readAlongMode = readAlongMode;
+    if (readAlongGranularity === "word" || readAlongGranularity === "sentence") partial.readAlongGranularity = readAlongGranularity;
     if (Object.keys(partial).length > 0) {
       useTTSStore.getState().updateTTSSettings(partial);
     }
@@ -124,6 +148,8 @@ export async function saveTTSSettings() {
     await store.set("rate", s.rate);
     await store.set("pitch", s.pitch);
     await store.set("volume", s.volume);
+    await store.set("readAlongMode", s.readAlongMode);
+    await store.set("readAlongGranularity", s.readAlongGranularity);
     await store.save();
   } catch (e) {
     console.error("TTS ayarlari kaydedilemedi:", e);

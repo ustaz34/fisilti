@@ -137,7 +137,7 @@ function startSilenceMonitor() {
     } catch {
       // Ses seviyesi okunamazsa devam et
     }
-  }, 200);
+  }, 300);
 }
 
 function startDurationCounter() {

@@ -10,6 +10,7 @@ let mediaRecorder: MediaRecorder | null = null;
 let mediaStream: MediaStream | null = null;
 let finalTranscript = "";
 let callbacks: StreamCallbacks | null = null;
+let cleaned = false;
 
 export function startDeepgram(
   apiKey: string,
@@ -19,6 +20,7 @@ export function startDeepgram(
   // Onceki oturumu temizle
   cleanup();
   finalTranscript = "";
+  cleaned = false;
   callbacks = cb;
 
   const lang = language || "tr";
@@ -30,7 +32,12 @@ export function startDeepgram(
   ws.onopen = async () => {
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: "audio/webm;codecs=opus" });
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm")
+          ? "audio/webm"
+          : "audio/mp4";
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0 && ws?.readyState === WebSocket.OPEN) {
@@ -89,6 +96,11 @@ export function stopDeepgram(): Promise<string> {
       mediaRecorder.stop();
     }
 
+    // Gecikmeli mesajlari onle
+    if (ws) {
+      ws.onmessage = null;
+    }
+
     if (ws && ws.readyState === WebSocket.OPEN) {
       // Deepgram'a kapanma sinyali gonder
       try {
@@ -109,6 +121,9 @@ export function stopDeepgram(): Promise<string> {
 }
 
 function cleanup() {
+  if (cleaned) return;
+  cleaned = true;
+
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
     try { mediaRecorder.stop(); } catch { /* */ }
   }
@@ -120,6 +135,7 @@ function cleanup() {
   }
 
   if (ws) {
+    ws.onmessage = null;
     try { ws.close(); } catch { /* */ }
     ws = null;
   }

@@ -8,6 +8,21 @@ use sha2::{Digest, Sha256};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
+/// Kelime siniri verisi — Edge TTS metadata'sindan parse edilir
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WordBoundary {
+    /// Audio offset (100ns ticks cinsinden)
+    pub audio_offset_ticks: u64,
+    /// Kelimenin suresi (100ns ticks cinsinden)
+    pub duration_ticks: u64,
+    /// Kelime metni
+    pub text: String,
+    /// Kelime uzunlugu (karakter)
+    pub text_length: u32,
+    /// Orijinal metindeki karakter pozisyonu
+    pub text_offset: u32,
+}
+
 const TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const SEC_MS_GEC_VERSION: &str = "1-143.0.3650.75";
 const CHROMIUM_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
@@ -207,6 +222,18 @@ pub async fn synthesize(
     pitch: f64,
     volume: f64,
 ) -> Result<Vec<u8>, String> {
+    let (audio, _boundaries) = synthesize_with_boundaries(text, voice, rate, pitch, volume).await?;
+    Ok(audio)
+}
+
+/// Edge TTS ile metni sentezler, MP3 audio + kelime sinirlari dondurur
+pub async fn synthesize_with_boundaries(
+    text: &str,
+    voice: &str,
+    rate: f64,
+    pitch: f64,
+    volume: f64,
+) -> Result<(Vec<u8>, Vec<WordBoundary>), String> {
     // Bos metin kontrolu
     let clean = sanitize_text(text);
     if clean.trim().is_empty() {
@@ -216,7 +243,7 @@ pub async fn synthesize(
     let mut last_err = String::new();
     for attempt in 0..3 {
         match synthesize_inner(text, voice, rate, pitch, volume).await {
-            Ok(audio) => return Ok(audio),
+            Ok(result) => return Ok(result),
             Err(e) => {
                 last_err = e;
                 if attempt < 2 {
@@ -236,7 +263,7 @@ async fn synthesize_inner(
     rate: f64,
     pitch: f64,
     volume: f64,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, Vec<WordBoundary>), String> {
     let clean = sanitize_text(text);
     let connection_id = generate_hex_id();
     let request_id = generate_hex_id();
@@ -337,8 +364,9 @@ async fn synthesize_inner(
 
     eprintln!("[edge-tts] SSML gonderildi, audio bekleniyor...");
 
-    // Audio verisi al
+    // Audio verisi ve word boundary metadata'si al
     let mut audio_chunks: Vec<Vec<u8>> = Vec::new();
+    let mut word_boundaries: Vec<WordBoundary> = Vec::new();
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while let Some(msg) = ws.next().await {
@@ -364,6 +392,49 @@ async fn synthesize_inner(
                     } else if txt.contains("Path:turn.end") {
                         eprintln!("[edge-tts] turn.end alindi");
                         break;
+                    } else if txt.contains("Path:audio.metadata") {
+                        // Word boundary metadata parse et
+                        if let Some(json_start) = txt.find("\r\n\r\n") {
+                            let json_str = &txt[json_start + 4..];
+                            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                if let Some(items) = meta.get("Metadata").and_then(|m| m.as_array()) {
+                                    for item in items {
+                                        let data_obj = match item.get("Data") {
+                                            Some(d) => d,
+                                            None => continue,
+                                        };
+                                        let offset = data_obj.get("Offset")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        let duration = data_obj.get("Duration")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        if let Some(text_obj) = data_obj.get("text") {
+                                            let word_text = text_obj.get("Text")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            let word_len = text_obj.get("Length")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(word_text.len() as u64) as u32;
+                                            // BoundaryType: "WordBoundary" olanlar
+                                            let boundary_type = text_obj.get("BoundaryType")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("WordBoundary");
+                                            if boundary_type == "WordBoundary" && !word_text.is_empty() {
+                                                word_boundaries.push(WordBoundary {
+                                                    audio_offset_ticks: offset,
+                                                    duration_ticks: duration,
+                                                    text: word_text,
+                                                    text_length: word_len,
+                                                    text_offset: 0, // asagida hesaplanacak
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         // Diger mesajlar (hata mesajlari dahil)
                         let preview = if txt.len() > 200 { &txt[..200] } else { &txt };
@@ -413,11 +484,43 @@ async fn synthesize_inner(
         return Err("Edge TTS: ses verisi alinamadi".to_string());
     }
 
+    // Word boundary text_offset/text_length hesapla:
+    // KARAKTER bazli offset (UTF-8 byte degil!) — UIA ve JS String.slice icin gerekli
+    // Orijinal metin uzerinde arar, Turkce karakterler (ş,ğ,ü,ı,ç,ö) icin dogru sonuc verir
+    let mut search_from_byte: usize = 0;
+    for wb in word_boundaries.iter_mut() {
+        // Orijinal metinde kelimeyi ara (byte offset doner)
+        let found = text[search_from_byte..].find(&wb.text)
+            .map(|pos| search_from_byte + pos);
+        if let Some(byte_pos) = found {
+            // Byte offset -> karakter offset cevrimi
+            let char_offset = text[..byte_pos].chars().count();
+            let char_length = wb.text.chars().count();
+            wb.text_offset = char_offset as u32;
+            wb.text_length = char_length as u32;
+            search_from_byte = byte_pos + wb.text.len(); // byte cinsinden ilerle
+        } else {
+            // Orijinalde bulunamazsa sanitize edilmiste dene
+            let clean_text_local = sanitize_text(text);
+            let clean_byte_start = search_from_byte.min(clean_text_local.len());
+            if let Some(pos) = clean_text_local[clean_byte_start..].find(&wb.text) {
+                let byte_pos = clean_byte_start + pos;
+                wb.text_offset = clean_text_local[..byte_pos].chars().count() as u32;
+                wb.text_length = wb.text.chars().count() as u32;
+                search_from_byte = byte_pos + wb.text.len();
+            } else {
+                wb.text_offset = text[..search_from_byte.min(text.len())].chars().count() as u32;
+                wb.text_length = wb.text.chars().count() as u32;
+            }
+        }
+    }
+
     eprintln!(
-        "[edge-tts] Basarili! {} chunk, toplam {} byte",
+        "[edge-tts] Basarili! {} chunk, toplam {} byte, {} word boundary",
         chunk_count,
-        total_len
+        total_len,
+        word_boundaries.len()
     );
 
-    Ok(audio)
+    Ok((audio, word_boundaries))
 }

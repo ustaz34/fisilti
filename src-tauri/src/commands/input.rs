@@ -39,6 +39,11 @@ fn is_our_window(hwnd: isize) -> bool {
     }
 }
 
+/// Son kaydedilen foreground pencere HWND'sini dondurur (UIA read-along icin)
+pub fn get_last_foreground_hwnd() -> isize {
+    LAST_FOREGROUND_HWND.load(Ordering::SeqCst)
+}
+
 /// Dahili fonksiyon - sadece bizim olmayan pencereleri kaydet
 pub fn save_foreground_internal() {
     #[cfg(target_os = "windows")]

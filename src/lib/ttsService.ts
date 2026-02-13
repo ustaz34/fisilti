@@ -1,6 +1,7 @@
 import { useTTSStore, type TTSVoice } from "../stores/ttsStore";
-import { synthesizeEdgeTTS, getEdgeVoices, getEdgeTurkishVoices } from "./edgeTTSService";
+import { synthesizeEdgeTTS, synthesizeEdgeTTSWithBoundaries, getEdgeVoices, getEdgeTurkishVoices, type WordBoundary } from "./edgeTTSService";
 import { emit } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
 const MAX_CHUNK_LENGTH = 4000;
 
@@ -16,6 +17,14 @@ class TTSService {
   // Edge engine state
   private audioElement: HTMLAudioElement | null = null;
   private audioBlobUrl: string | null = null;
+
+  // Word boundary tracking
+  private edgeWordBoundaries: WordBoundary[] = [];
+  private edgeChunkCharOffsets: number[] = []; // her chunk'un global karakter offset'i
+  private trackingInterval: number | null = null; // yuksek frekanslı kelime takip dongusu
+  private lastHighlightedOffset = -1; // ayni pozisyonu tekrar gondermeyi onle
+  private lastSentenceIndex = -1; // cumle hassasiyeti icin
+  private isRestarting = false; // speak() icinden stop() cagirildiginda UIA temizligini atla
 
   private constructor() {
     this.synth = window.speechSynthesis;
@@ -59,13 +68,29 @@ class TTSService {
 
   // ─── Unified API ───
 
-  async speak(text: string) {
+  async speak(text: string, readAlong?: boolean) {
     if (!text.trim()) return;
+    this.isRestarting = true;
     this.stop();
+    this.isRestarting = false;
     this.isStopping = false;
 
     const store = useTTSStore.getState();
     store.setCurrentText(text);
+    // Overlay penceresine de metni gonder (ayri WebView, ayri store)
+    emit("tts-text-set", { text }).catch(() => {});
+
+    // Kisayol ile tetiklendiginde mod "off" ise otomatik olarak "source" yap
+    if (readAlong && store.settings.readAlongMode === "off") {
+      useTTSStore.getState().updateTTSSettings({ readAlongMode: "source" });
+      console.debug("[TTS] readAlongMode otomatik olarak 'source' yapildi");
+    }
+
+    // UIA init artik Rust tarafinda yapiliyor (trigger_tts_read icinde, fokus kaynak uygulamadayken)
+    // readAlongSupported SettingsApp.tsx event handler'inda set ediliyor
+    if (readAlong) {
+      console.debug("[TTS] Read-along aktif, UIA destegi:", useTTSStore.getState().readAlongSupported);
+    }
 
     if (store.settings.engine === "edge") {
       await this.speakEdge(text);
@@ -117,7 +142,17 @@ class TTSService {
     // Edge engine
     this.edgeChunks = [];
     this.edgeChunkIndex = 0;
+    this.edgeWordBoundaries = [];
+    this.edgeChunkCharOffsets = [];
+    this.lastSentenceIndex = -1;
+    this.lastHighlightedOffset = -1;
+    this.stopWordTracking();
     this.cleanupAudio();
+    // Read-along durdur — yeni oturum baslatilirken (isRestarting) temizlik yapma
+    // cunku UIA konteksti Rust tarafinda zaten kurulmus/kurulacak
+    if (!this.isRestarting && useTTSStore.getState().settings.readAlongMode !== "off") {
+      invoke("uia_stop_read_along").catch(() => {});
+    }
     useTTSStore.getState().reset();
     this.emitStatus("idle");
   }
@@ -163,6 +198,14 @@ class TTSService {
       const globalIndex = chunkOffset + event.charIndex;
       const store = useTTSStore.getState();
       store.setProgress(globalIndex, store.totalChars);
+
+      // Read-along: browser engine word boundary
+      if (event.name === "word" && store.settings.readAlongMode !== "off") {
+        const wordLen = event.charLength || 1;
+        const word = chunk.slice(event.charIndex, event.charIndex + wordLen);
+        const globalOffset = chunkOffset + event.charIndex;
+        this.handleWordBoundary(word, globalOffset, wordLen);
+      }
     };
 
     utterance.onend = () => {
@@ -182,10 +225,15 @@ class TTSService {
 
   private onBrowserComplete() {
     const store = useTTSStore.getState();
+    if (store.settings.readAlongMode !== "off") {
+      invoke("uia_stop_read_along").catch(() => {});
+    }
+    this.stopWordTracking();
     store.setStatus("idle");
     store.setProgress(store.totalChars, store.totalChars);
     this.chunks = [];
     this.currentChunkIndex = 0;
+    this.lastSentenceIndex = -1;
     this.emitStatus("idle");
   }
 
@@ -204,6 +252,16 @@ class TTSService {
     // Metni cumlelere bol (Edge TTS icin ~2000 karakter siniri guvenli)
     this.edgeChunks = this.splitTextIntoChunks(text);
     this.edgeChunkIndex = 0;
+    this.edgeWordBoundaries = [];
+    this.lastSentenceIndex = -1;
+
+    // Chunk char offset'lerini hesapla
+    this.edgeChunkCharOffsets = [];
+    let offset = 0;
+    for (const c of this.edgeChunks) {
+      this.edgeChunkCharOffsets.push(offset);
+      offset += c.length;
+    }
 
     await this.playNextEdgeChunk();
   }
@@ -212,6 +270,13 @@ class TTSService {
     if (this.isStopping) return;
     if (this.edgeChunkIndex >= this.edgeChunks.length) {
       // Tum parcalar bitti
+      if (useTTSStore.getState().settings.readAlongMode !== "off") {
+        invoke("uia_stop_read_along").catch(() => {});
+      }
+      this.stopWordTracking();
+      this.edgeWordBoundaries = [];
+      this.lastSentenceIndex = -1;
+      this.lastHighlightedOffset = -1;
       useTTSStore.getState().reset();
       this.emitStatus("idle");
       this.cleanupAudio();
@@ -223,15 +288,24 @@ class TTSService {
 
     try {
       const voice = settings.selectedVoice || "tr-TR-EmelNeural";
-      console.log(`[TTS] Edge chunk ${this.edgeChunkIndex + 1}/${this.edgeChunks.length}: ${chunk.length} karakter`);
+      const readAlongMode = settings.readAlongMode;
+      const useReadAlong = readAlongMode !== "off";
+      console.debug(`[TTS] Edge chunk ${this.edgeChunkIndex + 1}/${this.edgeChunks.length}: ${chunk.length} karakter, readAlong=${readAlongMode}`);
 
-      const blob = await synthesizeEdgeTTS(
-        chunk,
-        voice,
-        settings.rate,
-        settings.pitch,
-        settings.volume
-      );
+      let blob: Blob;
+      let chunkBoundaries: import("./edgeTTSService").WordBoundary[] = [];
+
+      if (useReadAlong) {
+        const result = await synthesizeEdgeTTSWithBoundaries(
+          chunk, voice, settings.rate, settings.pitch, settings.volume
+        );
+        blob = result.blob;
+        chunkBoundaries = result.wordBoundaries;
+      } else {
+        blob = await synthesizeEdgeTTS(
+          chunk, voice, settings.rate, settings.pitch, settings.volume
+        );
+      }
 
       if (this.isStopping) return;
 
@@ -243,30 +317,41 @@ class TTSService {
         return;
       }
 
+      // Bu chunk'in word boundary'lerini sakla
+      this.edgeWordBoundaries = chunkBoundaries;
+
       this.cleanupAudio();
       this.audioBlobUrl = URL.createObjectURL(blob);
       this.audioElement = new Audio(this.audioBlobUrl);
 
+      const chunkGlobalOffset = this.edgeChunkCharOffsets[this.edgeChunkIndex] || 0;
+
       this.audioElement.onplay = () => {
         useTTSStore.getState().setStatus("speaking");
         this.emitStatus("speaking");
+        // Yuksek frekanslı kelime takip dongusunu baslat
+        if (useReadAlong) {
+          this.startWordTracking(chunkGlobalOffset);
+        }
       };
 
       this.audioElement.ontimeupdate = () => {
         if (this.audioElement) {
-          const pct = this.audioElement.currentTime / (this.audioElement.duration || 1);
-          const chunkOffset = this.edgeChunks
-            .slice(0, this.edgeChunkIndex)
-            .reduce((acc, c) => acc + c.length, 0);
+          const currentTime = this.audioElement.currentTime;
+          const duration = this.audioElement.duration || 1;
+          const pct = currentTime / duration;
           const total = useTTSStore.getState().totalChars;
-          const globalPct = (chunkOffset + pct * chunk.length) / (total || 1);
+          const globalPct = (chunkGlobalOffset + pct * chunk.length) / (total || 1);
           useTTSStore.getState().setProgress(Math.round(globalPct * total), total);
         }
       };
 
       this.audioElement.onended = () => {
         if (this.isStopping) return;
+        this.stopWordTracking();
+        this.lastHighlightedOffset = -1;
         this.edgeChunkIndex++;
+        this.edgeWordBoundaries = [];
         this.playNextEdgeChunk();
       };
 
@@ -310,6 +395,120 @@ class TTSService {
     }
   }
 
+  // ─── Read-Along Helpers ───
+
+  /**
+   * Yuksek frekanslı (30ms) kelime takip dongusu baslat.
+   * ontimeupdate (~250ms) yerine bu dongu kullanilarak daha akici vurgulama saglanir.
+   */
+  private startWordTracking(chunkGlobalOffset: number) {
+    this.stopWordTracking();
+    if (this.edgeWordBoundaries.length === 0) return;
+
+    this.trackingInterval = window.setInterval(() => {
+      if (!this.audioElement || this.audioElement.paused || this.isStopping) return;
+
+      const currentTicks = this.audioElement.currentTime * 10_000_000;
+      // Binary search yerine ters linear scan — boundary sayisi genelde <50
+      let matched: WordBoundary | null = null;
+      for (let i = this.edgeWordBoundaries.length - 1; i >= 0; i--) {
+        if (this.edgeWordBoundaries[i].audio_offset_ticks <= currentTicks) {
+          matched = this.edgeWordBoundaries[i];
+          break;
+        }
+      }
+      if (matched) {
+        const globalOffset = chunkGlobalOffset + matched.text_offset;
+        this.handleWordBoundary(matched.text, globalOffset, matched.text_length);
+      }
+    }, 30); // ~33 fps — akici takip
+  }
+
+  private stopWordTracking() {
+    if (this.trackingInterval) {
+      clearInterval(this.trackingInterval);
+      this.trackingInterval = null;
+    }
+  }
+
+  private handleWordBoundary(
+    word: string,
+    globalOffset: number,
+    wordLength: number,
+  ) {
+    // Ayni pozisyonu tekrar isleme — dedup
+    if (globalOffset === this.lastHighlightedOffset) return;
+    this.lastHighlightedOffset = globalOffset;
+
+    const store = useTTSStore.getState();
+    const mode = store.settings.readAlongMode;
+    const granularity = store.settings.readAlongGranularity;
+
+    if (granularity === "sentence") {
+      // Cumle hassasiyeti: tum cumleyi vurgula
+      const bounds = this.findSentenceBounds(globalOffset, store.currentText);
+      if (bounds.index === this.lastSentenceIndex) return;
+      this.lastSentenceIndex = bounds.index;
+
+      if ((mode === "source" || mode === "both") && store.readAlongSupported) {
+        invoke("uia_highlight_word", { charOffset: bounds.start, charLength: bounds.length }).catch(() => {});
+      }
+      if (mode === "overlay" || mode === "both") {
+        const sentenceText = store.currentText.slice(bounds.start, bounds.start + bounds.length);
+        store.setCurrentWord(sentenceText, bounds.start, bounds.length);
+        // Overlay penceresine de gonder (ayri WebView)
+        emit("tts-word-update", { word: sentenceText, offset: bounds.start, length: bounds.length }).catch(() => {});
+      }
+      return;
+    }
+
+    // Kelime hassasiyeti
+    if ((mode === "source" || mode === "both") && store.readAlongSupported) {
+      invoke("uia_highlight_word", { charOffset: globalOffset, charLength: wordLength }).catch(() => {});
+    }
+    if (mode === "overlay" || mode === "both") {
+      store.setCurrentWord(word, globalOffset, wordLength);
+      // Overlay penceresine de gonder (ayri WebView)
+      emit("tts-word-update", { word, offset: globalOffset, length: wordLength }).catch(() => {});
+    }
+  }
+
+  /**
+   * Verilen karakter offset'inin icinde bulundugu cumlenin sinirlarini dondurur.
+   */
+  private findSentenceBounds(charOffset: number, fullText: string): { index: number; start: number; length: number } {
+    const enders = /[.!?;]/;
+    let sentenceIdx = 0;
+    let sentenceStart = 0;
+
+    // charOffset'ten onceki cumle sinirlarini tara
+    for (let i = 0; i < fullText.length && i < charOffset; i++) {
+      if (enders.test(fullText[i])) {
+        sentenceIdx++;
+        sentenceStart = i + 1;
+        // Noktalama sonrasi bosluklari atla
+        while (sentenceStart < fullText.length && /\s/.test(fullText[sentenceStart])) {
+          sentenceStart++;
+        }
+      }
+    }
+
+    // Cumlenin sonunu bul
+    let sentenceEnd = fullText.length;
+    for (let i = Math.max(sentenceStart, charOffset); i < fullText.length; i++) {
+      if (enders.test(fullText[i])) {
+        sentenceEnd = i + 1; // noktalamayi dahil et
+        break;
+      }
+    }
+
+    return {
+      index: sentenceIdx,
+      start: sentenceStart,
+      length: sentenceEnd - sentenceStart,
+    };
+  }
+
   // ─── Helpers ───
 
   private splitTextIntoChunks(text: string): string[] {
@@ -340,6 +539,7 @@ class TTSService {
       text: preview,
       charIndex: store.charIndex,
       totalChars: store.totalChars,
+      readAlongMode: store.settings.readAlongMode,
     }).catch(() => {});
   }
 }

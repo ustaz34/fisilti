@@ -130,20 +130,37 @@ function App() {
 
   // TTS: tts-status-changed event'ini dinle (main window'dan senkronize)
   useEffect(() => {
-    const unlisten = listen<{ status: string; text?: string; charIndex?: number; totalChars?: number }>("tts-status-changed", (event) => {
-      const { status, text, charIndex, totalChars } = event.payload;
+    const unlisten = listen<{ status: string; text?: string; charIndex?: number; totalChars?: number; readAlongMode?: string }>("tts-status-changed", (event) => {
+      const { status, text, charIndex, totalChars, readAlongMode } = event.payload;
       const store = useTTSStore.getState();
       store.setStatus(status as "idle" | "loading" | "speaking" | "paused");
       if (text !== undefined) store.setPreviewText(text);
       if (charIndex !== undefined && totalChars !== undefined) store.setProgress(charIndex, totalChars);
+      if (readAlongMode) store.updateTTSSettings({ readAlongMode: readAlongMode as "off" | "source" | "overlay" | "both" });
+      // idle'da karaoke state'ini temizle
+      if (status === "idle") {
+        store.setCurrentWord("", 0, 0);
+      }
     });
     return () => {
       unlisten.then((fn) => fn());
     };
   }, []);
 
-  // NOT: TTS speak event'leri sadece SettingsApp (main window) tarafinda dinlenir
-  // Overlay sadece tts-status-changed ile durum gunceller, speak tetiklemez
+  // Overlay karaoke: kelime pozisyonu ve metin event'lerini dinle
+  useEffect(() => {
+    const unlisten1 = listen<{ text: string }>("tts-text-set", (event) => {
+      useTTSStore.getState().setCurrentText(event.payload.text);
+    });
+    const unlisten2 = listen<{ word: string; offset: number; length: number }>("tts-word-update", (event) => {
+      const { word, offset, length } = event.payload;
+      useTTSStore.getState().setCurrentWord(word, offset, length);
+    });
+    return () => {
+      unlisten1.then((fn) => fn());
+      unlisten2.then((fn) => fn());
+    };
+  }, []);
 
   // Kayit sirasinda ses seviyesini sorgula (sadece whisper modunda)
   useEffect(() => {
@@ -157,7 +174,7 @@ function App() {
           } catch {
             // ignore
           }
-        }, 50);
+        }, 100);
       }
     } else {
       setAudioLevel(0);

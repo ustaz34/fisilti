@@ -48,7 +48,7 @@ export async function startSileroVad(
     });
 
     vadInstance.start();
-    console.log("[Silero VAD] Baslatildi");
+    // Silero VAD baslatildi
     return true;
   } catch (err) {
     console.warn("[Silero VAD] Baslatilamadi, fallback VAD kullanilacak:", err);

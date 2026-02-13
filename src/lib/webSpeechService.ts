@@ -111,7 +111,7 @@ export function startWebSpeech(
   };
 
   recognition.onend = () => {
-    console.log("[WebSpeech] onend — finalTranscript:", finalTranscript.substring(0, 50));
+    // onend tetiklendi
     recognition = null;
     clearSilenceTimer();
 
@@ -149,7 +149,7 @@ export function stopWebSpeech(): Promise<string> {
         }
         resolve(finalTranscript || lastInterimText);
       }
-    }, 3000);
+    }, 2000);
   });
 }
 

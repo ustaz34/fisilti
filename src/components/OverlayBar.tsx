@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { useRecordingStore } from "../stores/recordingStore";
@@ -8,6 +8,17 @@ import { WaveLine } from "./WaveLine";
 import { loadThemeConfig } from "../lib/themeEngine";
 import { DEFAULT_CONFIG, type OverlayStyle, type OverlayAnimation, type WaveformStyle, type GlowIntensity } from "../lib/themes";
 
+interface ThemeState {
+  overlayStyle: OverlayStyle;
+  overlayAnim: OverlayAnimation;
+  waveformStyle: WaveformStyle;
+  glowIntensity: GlowIntensity;
+}
+
+function themeReducer(_state: ThemeState, action: Partial<ThemeState>): ThemeState {
+  return { ..._state, ...action };
+}
+
 export function OverlayBar() {
   const { isRecording, duration } = useRecordingStore();
   const { isTranscribing } = useTranscriptionStore();
@@ -15,30 +26,43 @@ export function OverlayBar() {
   const ttsPreview = useTTSStore((s) => s.previewText);
   const ttsCharIndex = useTTSStore((s) => s.charIndex);
   const ttsTotalChars = useTTSStore((s) => s.totalChars);
+  const readAlongMode = useTTSStore((s) => s.settings.readAlongMode);
+  const fullText = useTTSStore((s) => s.currentText);
+  const wordOffset = useTTSStore((s) => s.currentWordOffset);
+  const wordLength = useTTSStore((s) => s.currentWordLength);
+  const karaokeRef = useRef<HTMLDivElement>(null);
+  const barRef = useRef<HTMLDivElement>(null);
 
-  const [overlayStyle, setOverlayStyle] = useState<OverlayStyle>(DEFAULT_CONFIG.overlayStyle);
-  const [overlayAnim, setOverlayAnim] = useState<OverlayAnimation>(DEFAULT_CONFIG.overlayAnimation);
-  const [waveformStyle, setWaveformStyle] = useState<WaveformStyle>(DEFAULT_CONFIG.waveformStyle);
-  const [glowIntensity, setGlowIntensity] = useState<GlowIntensity>(DEFAULT_CONFIG.glowIntensity);
+  const [theme, dispatchTheme] = useReducer(themeReducer, {
+    overlayStyle: DEFAULT_CONFIG.overlayStyle,
+    overlayAnim: DEFAULT_CONFIG.overlayAnimation,
+    waveformStyle: DEFAULT_CONFIG.waveformStyle,
+    glowIntensity: DEFAULT_CONFIG.glowIntensity,
+  });
+  const { overlayStyle, overlayAnim, waveformStyle, glowIntensity } = theme;
 
   useEffect(() => {
     const config = loadThemeConfig();
-    setOverlayStyle(config.overlayStyle);
-    setOverlayAnim(config.overlayAnimation);
-    setWaveformStyle(config.waveformStyle);
-    setGlowIntensity(config.glowIntensity);
+    dispatchTheme({
+      overlayStyle: config.overlayStyle,
+      overlayAnim: config.overlayAnimation,
+      waveformStyle: config.waveformStyle,
+      glowIntensity: config.glowIntensity,
+    });
   }, []);
 
-  // theme-changed event'inden tum attributelari guncelle
+  // theme-changed event'inden tum attributelari guncelle (tek batch update)
   useEffect(() => {
     const bar = document.querySelector(".overlay-bar");
     if (bar) {
       const observer = new MutationObserver(() => {
-        setOverlayStyle((bar.getAttribute("data-style") as OverlayStyle) ?? DEFAULT_CONFIG.overlayStyle);
-        setOverlayAnim((bar.getAttribute("data-anim") as OverlayAnimation) ?? DEFAULT_CONFIG.overlayAnimation);
-        setGlowIntensity((bar.getAttribute("data-glow") as GlowIntensity) ?? DEFAULT_CONFIG.glowIntensity);
         const config = loadThemeConfig();
-        setWaveformStyle(config.waveformStyle);
+        dispatchTheme({
+          overlayStyle: (bar.getAttribute("data-style") as OverlayStyle) ?? DEFAULT_CONFIG.overlayStyle,
+          overlayAnim: (bar.getAttribute("data-anim") as OverlayAnimation) ?? DEFAULT_CONFIG.overlayAnimation,
+          glowIntensity: (bar.getAttribute("data-glow") as GlowIntensity) ?? DEFAULT_CONFIG.glowIntensity,
+          waveformStyle: config.waveformStyle,
+        });
       });
       observer.observe(bar, { attributes: true, attributeFilter: ["data-style", "data-anim", "data-glow"] });
       return () => observer.disconnect();
@@ -47,20 +71,19 @@ export function OverlayBar() {
 
   const isTTSActive = ttsStatus === "speaking" || ttsStatus === "paused" || ttsStatus === "loading";
 
-  // Win32 hit-test alanini guncelle: aktifken genis, idle'da kucuk
+  // Win32 hit-test alanini guncelle: aktifken piksel-dogru boyut gonder, idle'da sifirla
   useEffect(() => {
-    const setActive = async (active: boolean, retries = 2) => {
-      for (let i = 0; i <= retries; i++) {
-        try {
-          await invoke("set_overlay_bar_active", { active });
-          return;
-        } catch (err) {
-          if (i === retries) console.error("set_overlay_bar_active failed:", err);
-          else await new Promise(r => setTimeout(r, 100));
-        }
-      }
-    };
-    setActive(isRecording || isTranscribing || isTTSActive);
+    const active = isRecording || isTranscribing || isTTSActive;
+    const el = barRef.current;
+    let width: number | undefined;
+    let height: number | undefined;
+    if (active && el) {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = el.getBoundingClientRect();
+      width = Math.round(rect.width * dpr);
+      height = Math.round(rect.height * dpr);
+    }
+    invoke("set_overlay_bar_active", { active, width, height }).catch(() => {});
   }, [isRecording, isTranscribing, isTTSActive]);
 
   // TTS kontrol fonksiyonlari — event ile main window'a gonder
@@ -75,6 +98,20 @@ export function OverlayBar() {
     emit("tts-control", { action: "stop" });
   };
 
+  // Karaoke modu: aktif kelime degisince scroll
+  useEffect(() => {
+    if (karaokeRef.current && wordOffset > 0) {
+      const activeEl = karaokeRef.current.querySelector(".tts-read-active") as HTMLElement | null;
+      if (activeEl) {
+        const container = karaokeRef.current;
+        const scrollLeft = activeEl.offsetLeft - container.clientWidth / 2 + activeEl.clientWidth / 2;
+        container.scrollTo({ left: Math.max(0, scrollLeft), behavior: "smooth" });
+      }
+    }
+  }, [wordOffset, wordLength]);
+
+  const showKaraoke = isTTSActive && (readAlongMode === "overlay" || readAlongMode === "both") && fullText && wordLength > 0;
+
   const ttsProgress = ttsTotalChars > 0 ? (ttsCharIndex / ttsTotalChars) * 100 : 0;
 
   const status: "idle" | "recording" | "transcribing" = isRecording
@@ -88,6 +125,7 @@ export function OverlayBar() {
     return (
       <div className="overlay-wrap">
         <div
+          ref={barRef}
           className={`overlay-bar is-speaking`}
           data-style={overlayStyle}
           data-anim={overlayAnim}
@@ -114,12 +152,20 @@ export function OverlayBar() {
               )}
             </div>
 
-            {/* Orta: metin onizleme */}
-            <div className="tts-overlay-text">
-              <span className="tts-overlay-label">
-                {ttsStatus === "loading" ? "Hazırlanıyor..." : ttsStatus === "paused" ? "Duraklatıldı" : ttsPreview || "Seslendiriliyor..."}
-              </span>
-            </div>
+            {/* Orta: karaoke veya metin onizleme */}
+            {showKaraoke ? (
+              <div ref={karaokeRef} className="tts-karaoke-container">
+                <span className="tts-read">{fullText.slice(0, wordOffset)}</span>
+                <span className="tts-read-active">{fullText.slice(wordOffset, wordOffset + wordLength)}</span>
+                <span className="tts-read-dim">{fullText.slice(wordOffset + wordLength)}</span>
+              </div>
+            ) : (
+              <div className="tts-overlay-text">
+                <span className="tts-overlay-label">
+                  {ttsStatus === "loading" ? "Hazırlanıyor..." : ttsStatus === "paused" ? "Duraklatıldı" : ttsPreview || "Seslendiriliyor..."}
+                </span>
+              </div>
+            )}
 
             {/* Sag: kontroller */}
             {ttsStatus !== "loading" && (
@@ -153,6 +199,7 @@ export function OverlayBar() {
   return (
     <div className="overlay-wrap">
       <div
+        ref={barRef}
         className={`overlay-bar ${isRecording ? "is-recording" : isTranscribing ? "is-transcribing" : ""}`}
         data-style={overlayStyle}
         data-anim={overlayAnim}

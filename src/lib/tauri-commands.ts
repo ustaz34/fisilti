@@ -275,3 +275,17 @@ export async function promoteCorrection(wrong: string): Promise<void> {
 export async function demoteCorrection(wrong: string): Promise<void> {
   return invoke("demote_correction", { wrong });
 }
+
+// ─── UIA Read-Along ───
+
+export async function uiaInitReadAlong(): Promise<boolean> {
+  return invoke("uia_init_read_along");
+}
+
+export async function uiaHighlightWord(charOffset: number, charLength: number): Promise<void> {
+  return invoke("uia_highlight_word", { charOffset, charLength });
+}
+
+export async function uiaStopReadAlong(): Promise<void> {
+  return invoke("uia_stop_read_along");
+}

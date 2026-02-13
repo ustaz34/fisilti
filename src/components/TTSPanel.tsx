@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
-import { useTTSStore, loadTTSSettings, saveTTSSettings, type TTSEngine, type TTSLanguage, TTS_LANGUAGES } from "../stores/ttsStore";
+import { useTTSStore, loadTTSSettings, saveTTSSettings, type TTSEngine, type TTSLanguage, type ReadAlongMode, type ReadAlongGranularity, TTS_LANGUAGES } from "../stores/ttsStore";
 import { useSettingsStore, type AppSettings } from "../stores/settingsStore";
 import { getTTSService } from "../lib/ttsService";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
@@ -107,6 +107,12 @@ const icons = {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
       <rect x="2" y="4" width="20" height="16" rx="2" />
       <path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M6 16h12" />
+    </svg>
+  ),
+  readAlong: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+      <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
     </svg>
   ),
 };
@@ -458,6 +464,39 @@ export function TTSPanel() {
             Sesi Dene
           </button>
         </div>
+      </Section>
+
+      {/* Metin Takibi / Read-Along */}
+      <Section title="Metin Takibi" icon={icons.readAlong}>
+        <Item title="Takip Modu" desc="Seslendirme sirasinda kelime vurgulama">
+          <Sel
+            value={ttsSettings.readAlongMode}
+            options={[
+              { id: "off", name: "Kapali" },
+              { id: "source", name: "Kaynak Uygulama" },
+              { id: "overlay", name: "Overlay" },
+              { id: "both", name: "Ikisi Birden" },
+            ]}
+            onChange={(v) => {
+              useTTSStore.getState().updateTTSSettings({ readAlongMode: v as ReadAlongMode });
+              saveTTSSettings();
+            }}
+          />
+        </Item>
+
+        <Item title="Hassasiyet" desc="Kelime kelime veya cumle cumle takip">
+          <Sel
+            value={ttsSettings.readAlongGranularity}
+            options={[
+              { id: "word", name: "Kelime" },
+              { id: "sentence", name: "Cumle" },
+            ]}
+            onChange={(v) => {
+              useTTSStore.getState().updateTTSSettings({ readAlongGranularity: v as ReadAlongGranularity });
+              saveTTSSettings();
+            }}
+          />
+        </Item>
       </Section>
 
       {/* Kisayol ayari */}
