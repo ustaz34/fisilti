@@ -1,13 +1,26 @@
 mod audio;
+mod clipboard_watcher;
+mod collab_server;
 mod commands;
 mod corrections;
 mod edge_tts;
 mod keyboard_hook;
+mod live_translation;
+mod llm_client;
+mod meeting;
 mod model;
+mod mouse_hook;
+mod peer_discovery;
+mod sentiment;
 mod settings;
+mod streaming_stt;
 mod text;
+mod translate;
 mod transcription;
 mod uia_highlight;
+mod vad;
+mod voice_commands;
+mod wasapi_capture;
 
 use serde::Serialize;
 use tauri::Emitter;
@@ -16,8 +29,12 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use parking_lot::Mutex;
 #[cfg(target_os = "windows")]
 use windows::core::Interface;
+
+/// Bekleyen metin secimi — context-menu WebView'a iletilecek
+static PENDING_SELECTION: Mutex<Option<(String, i32, i32)>> = Mutex::new(None);
 
 /// Overlay penceresinin Win32 HWND'si (setup_overlay_win32 tarafindan set edilir)
 static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -124,6 +141,35 @@ pub fn run() {
             // TTS global kisayol kaydet
             setup_tts_shortcut(&app_handle);
 
+            // Ceviri global kisayol kaydet
+            setup_translate_shortcut(&app_handle);
+
+            // Mouse hook baslat (otomatik secim algilama)
+            {
+                let settings = commands::settings::get_settings(app_handle.clone());
+                mouse_hook::set_enabled(settings.translate_auto_detect);
+            }
+            mouse_hook::install(app_handle.clone());
+
+            // Pano izlemeyi baslat
+            clipboard_watcher::start_clipboard_watcher(app_handle.clone());
+
+            // Captions penceresi — baslangiçta gizli, seffaf
+            if let Some(window) = app.get_webview_window("captions") {
+                window.set_title("").ok();
+                use tauri::webview::Color as CaptColor;
+                window.set_background_color(Some(CaptColor(0, 0, 0, 0))).ok();
+                window.hide().ok();
+            }
+
+            // Radial menu penceresi — baslangiçta gizli, seffaf
+            if let Some(window) = app.get_webview_window("radial-menu") {
+                window.set_title("").ok();
+                use tauri::webview::Color as RadColor;
+                window.set_background_color(Some(RadColor(0, 0, 0, 0))).ok();
+                window.hide().ok();
+            }
+
             // Overlay penceresi - baslik temizle, konumlandir, goster
             if let Some(window) = app.get_webview_window("overlay") {
                 window.set_title("").ok();
@@ -170,6 +216,27 @@ pub fn run() {
 
             // Ana pencereye DWM frame extension uygula (transparent + decorations:false click fix)
             setup_main_window_win32(app.handle().clone());
+
+            // Context menu penceresi — baslangiçta gizli, seffaf, noactivate
+            if let Some(window) = app.get_webview_window("context-menu") {
+                window.set_title("").ok();
+                use tauri::webview::Color as CmColor;
+                window.set_background_color(Some(CmColor(0, 0, 0, 0))).ok();
+                // NOT: ignore_cursor_events burada ayarlamiyoruz
+                // show_context_menu_internal'da false yapilacak
+                window.hide().ok();
+
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        window_clone.hide().ok();
+                    }
+                });
+
+                // Win32: WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW
+                setup_context_menu_win32(app.handle().clone());
+            }
 
             // Overlay follow cursor ayarini yukle
             {
@@ -230,6 +297,44 @@ pub fn run() {
             uia_init_read_along,
             uia_highlight_word,
             uia_stop_read_along,
+            translate_text,
+            show_context_menu,
+            hide_context_menu,
+            resize_context_menu,
+            get_pending_selection,
+            start_context_menu_drag,
+            change_translate_shortcut,
+            set_mouse_hook_enabled,
+            // v2.1+ yeni komutlar
+            voice_commands::extract_voice_commands,
+            sentiment::analyze_text_sentiment,
+            clipboard_watcher::get_clipboard_history,
+            clipboard_watcher::clear_clipboard_history,
+            clipboard_watcher::pin_clipboard_entry,
+            clipboard_watcher::delete_clipboard_entry,
+            meeting::start_meeting,
+            meeting::stop_meeting,
+            meeting::add_meeting_chunk,
+            meeting::get_meeting_state,
+            meeting::get_meeting_transcript,
+            meeting::get_meeting_speaker_stats,
+            meeting::update_chunk_speaker,
+            meeting::set_meeting_notes,
+            meeting::get_meeting_notes,
+            llm_client::process_with_llm,
+            peer_discovery::get_discovered_peers,
+            peer_discovery::stop_peer_service,
+            // Canli ceviri
+            live_translation::start_live_translation,
+            live_translation::stop_live_translation,
+            live_translation::get_live_translation_status,
+            live_translation::set_live_translation_languages,
+            live_translation::list_loopback_devices,
+            live_translation::submit_live_transcript,
+            // Isbirligi HTTP sunucu
+            collab_server::start_collab_server,
+            collab_server::stop_collab_server,
+            collab_server::get_collab_server_info,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri uygulamasi baslatilirken hata olustu");
@@ -270,14 +375,30 @@ fn setup_main_window_win32(app_handle: tauri::AppHandle) {
         const SWP_NOZORDER: u32 = 0x0004;
         const SWP_FRAMECHANGED: u32 = 0x0020;
         const WM_NCCALCSIZE: u32 = 0x0083;
+        const WM_NCHITTEST: u32 = 0x0084;
+        const WM_MOUSEACTIVATE: u32 = 0x0021;
+        const HTCLIENT: isize = 1;
+        const MA_ACTIVATE: isize = 1;
 
         static MAIN_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-        /// Subclassed WndProc: WM_NCCALCSIZE -> 0 dondurerek non-client area (1px ust border) kaldir
+        /// Subclassed WndProc:
+        /// - WM_NCCALCSIZE   -> 0 dondurerek non-client area (1px ust border) kaldir
+        /// - WM_NCHITTEST    -> HTCLIENT dondurerek Windows'un sol tiklari
+        ///   caption/snap aksiyonu olarak yutmasini onle (decorations:false fix)
+        /// - WM_MOUSEACTIVATE -> MA_ACTIVATE: pencere aktive edilirken tiklama
+        ///   olayinin yutulmasini (MA_ACTIVATEANDEAT) onle — WebView2 click fix
         unsafe extern "system" fn main_wndproc(hwnd: isize, msg: u32, wp: usize, lp: isize) -> isize {
             if msg == WM_NCCALCSIZE && wp == 1 {
-                // wparam=TRUE: non-client alanini sifirla — 1px ust border kalkar
                 return 0;
+            }
+            if msg == WM_NCHITTEST {
+                return HTCLIENT;
+            }
+            if msg == WM_MOUSEACTIVATE {
+                // MA_ACTIVATE: pencereyi aktive et VE tiklama olayini islemeye devam et.
+                // Bu sayede ilk tiklama "focus icin yutulmaz", dogrudan WebView2'ye ulasir.
+                return MA_ACTIVATE;
             }
             let orig = MAIN_ORIGINAL_WNDPROC.load(Ordering::Acquire);
             if orig != 0 {
@@ -524,6 +645,7 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
         extern "system" {
             fn ScreenToClient(hwnd: isize, point: *mut [i32; 2]) -> i32;
             fn GetClientRect(hwnd: isize, rect: *mut [i32; 4]) -> i32;
+            fn IsWindowVisible(hwnd: isize) -> i32;
         }
 
         /// Subclassed WndProc:
@@ -613,10 +735,15 @@ fn setup_overlay_win32(app_handle: tauri::AppHandle) {
         }
 
         // Adim 1: EnumWindows ile overlay HWND'sini bul (sadece kaydet)
+        // NOT: context-menu penceresi (280x52) de benzer boyutta oldugu icin
+        // sadece GORUNEN pencereleri dikkate al — context-menu baslangiçta gizli
         unsafe extern "system" fn enum_cb(hwnd: isize, our_pid: isize) -> i32 {
             let mut pid: u32 = 0;
             GetWindowThreadProcessId(hwnd, &mut pid);
             if pid != our_pid as u32 { return 1; }
+
+            // Gizli pencereleri atla (context-menu baslangicta gizli)
+            if IsWindowVisible(hwnd) == 0 { return 1; }
 
             let mut rect = [0i32; 4];
             GetWindowRect(hwnd, &mut rect);
@@ -887,7 +1014,7 @@ fn change_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "Ctrl+Shift+R".to_string())
     };
-    keyboard_hook::set_tts_key(0); // Onceki TTS hook'unu temizle
+    keyboard_hook::set_tts_key(0);
     if keyboard_hook::is_single_key(&tts_shortcut) {
         if let Some(vk) = keyboard_hook::key_name_to_vk(&tts_shortcut) {
             keyboard_hook::set_tts_key(vk);
@@ -896,13 +1023,30 @@ fn change_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String
         register_tts_shortcut(&app, &tts_shortcut).ok();
     }
 
+    // Ceviri kisayolunu tekrar kaydet
+    let translate_shortcut = {
+        use tauri_plugin_store::StoreExt;
+        app.store("settings.json").ok()
+            .and_then(|store| store.get("translate_shortcut"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Ctrl+Shift+T".to_string())
+    };
+    keyboard_hook::set_translate_key(0);
+    if keyboard_hook::is_single_key(&translate_shortcut) {
+        if let Some(vk) = keyboard_hook::key_name_to_vk(&translate_shortcut) {
+            keyboard_hook::set_translate_key(vk);
+        }
+    } else {
+        register_translate_shortcut(&app, &translate_shortcut).ok();
+    }
+
     Ok(())
 }
 
 /// Windows UI Automation ile odaklanmis uygulamadan secili metni dogrudan al
 /// Ctrl+C simülasyonuna gerek kalmadan, clipboard kirletmeden, aninda calisir
 #[cfg(target_os = "windows")]
-fn get_selected_text_uia() -> Option<String> {
+pub(crate) fn get_selected_text_uia() -> Option<String> {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize,
         CLSCTX_ALL, COINIT_APARTMENTTHREADED,
@@ -989,6 +1133,99 @@ fn get_selected_text_uia() -> Option<String> {
         CoUninitialize();
         result
     }
+}
+
+/// UIA ElementFromPoint ile secili metin alma — focused element yerine
+/// mouse konumundaki element'ten TextPattern ile secimi okur
+#[cfg(target_os = "windows")]
+pub(crate) fn get_selected_text_uia_at_point(x: i32, y: i32) -> Option<String> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationTextPattern,
+        IUIAutomationTextPattern2, UIA_TextPatternId, UIA_TextPattern2Id,
+    };
+    use windows::Win32::Foundation::POINT;
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+
+        let result = (|| -> Option<String> {
+            let automation: IUIAutomation =
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL).ok()?;
+
+            let pt = POINT { x, y };
+            let element = automation.ElementFromPoint(pt).ok()?;
+
+            let name = element.CurrentName().unwrap_or_default();
+            let ctrl_type = element.CurrentControlType().unwrap_or_default();
+            eprintln!("[uia-point] Element at ({},{}): name='{}', controlType={}", x, y, name, ctrl_type.0);
+
+            // TextPattern2 dene
+            if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_TextPattern2Id) {
+                let raw: *mut std::ffi::c_void = std::mem::transmute_copy(&pattern_unk);
+                if !raw.is_null() {
+                    if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern2>() {
+                        if let Ok(ranges) = text_pattern.GetSelection() {
+                            let count = ranges.Length().unwrap_or(0);
+                            if count > 0 {
+                                let mut selected = String::new();
+                                for i in 0..count {
+                                    if let Ok(range) = ranges.GetElement(i) {
+                                        if let Ok(bstr) = range.GetText(-1) {
+                                            selected.push_str(&bstr.to_string());
+                                        }
+                                    }
+                                }
+                                if !selected.trim().is_empty() {
+                                    eprintln!("[uia-point] TextPattern2: {} karakter", selected.len());
+                                    return Some(selected);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // TextPattern dene
+            if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_TextPatternId) {
+                let raw: *mut std::ffi::c_void = std::mem::transmute_copy(&pattern_unk);
+                if !raw.is_null() {
+                    if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern>() {
+                        if let Ok(ranges) = text_pattern.GetSelection() {
+                            let count = ranges.Length().unwrap_or(0);
+                            if count > 0 {
+                                let mut selected = String::new();
+                                for i in 0..count {
+                                    if let Ok(range) = ranges.GetElement(i) {
+                                        if let Ok(bstr) = range.GetText(-1) {
+                                            selected.push_str(&bstr.to_string());
+                                        }
+                                    }
+                                }
+                                if !selected.trim().is_empty() {
+                                    eprintln!("[uia-point] TextPattern: {} karakter", selected.len());
+                                    return Some(selected);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            None
+        })();
+
+        CoUninitialize();
+        result
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn get_selected_text_uia_at_point(_x: i32, _y: i32) -> Option<String> {
+    None
 }
 
 /// TTS kisayolu tetiklendiginde secili metni alip seslendiren mantik
@@ -1091,7 +1328,7 @@ fn register_tts_shortcut(app_handle: &tauri::AppHandle, shortcut: &str) -> Resul
 
 /// WM_COPY mesaji ile kopyalama — SendInput'tan daha guvenilir
 /// Dogrudan odaklanmis kontrole mesaj gonderir, klavye durumuna bagimli degil
-fn copy_via_wm_copy() -> bool {
+pub(crate) fn copy_via_wm_copy() -> bool {
     #[cfg(target_os = "windows")]
     unsafe {
         extern "system" {
@@ -1138,7 +1375,7 @@ fn copy_via_wm_copy() -> bool {
 }
 
 /// SendInput ile Ctrl+C simule et (WM_COPY fallback)
-fn simulate_ctrl_c() {
+pub(crate) fn simulate_ctrl_c() {
     #[cfg(target_os = "windows")]
     unsafe {
         extern "system" {
@@ -1241,6 +1478,23 @@ fn change_tts_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), St
         register_shortcut(&app, &main_shortcut).ok();
     }
 
+    // Ceviri kisayolunu tekrar kaydet
+    let translate_shortcut = {
+        use tauri_plugin_store::StoreExt;
+        app.store("settings.json").ok()
+            .and_then(|store| store.get("translate_shortcut"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Ctrl+Shift+T".to_string())
+    };
+    keyboard_hook::set_translate_key(0);
+    if keyboard_hook::is_single_key(&translate_shortcut) {
+        if let Some(vk) = keyboard_hook::key_name_to_vk(&translate_shortcut) {
+            keyboard_hook::set_translate_key(vk);
+        }
+    } else {
+        register_translate_shortcut(&app, &translate_shortcut).ok();
+    }
+
     // Yeni TTS kisayolunu kaydet
     if keyboard_hook::is_single_key(&shortcut) {
         let vk = keyboard_hook::key_name_to_vk(&shortcut)
@@ -1260,6 +1514,552 @@ fn change_tts_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), St
             }
         }
     }
+}
+
+#[tauri::command]
+fn set_mouse_hook_enabled(enabled: bool) {
+    mouse_hook::set_enabled(enabled);
+}
+
+fn setup_translate_shortcut(app_handle: &tauri::AppHandle) {
+    let shortcut = {
+        use tauri_plugin_store::StoreExt;
+        app_handle.store("settings.json").ok()
+            .and_then(|store| store.get("translate_shortcut"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Ctrl+Shift+T".to_string())
+    };
+
+    if keyboard_hook::is_single_key(&shortcut) {
+        if let Some(vk) = keyboard_hook::key_name_to_vk(&shortcut) {
+            keyboard_hook::set_translate_key(vk);
+            log::info!("Çeviri kısayol kaydedildi (hook): {} (vk={:#x})", shortcut, vk);
+        }
+    } else {
+        match register_translate_shortcut(app_handle, &shortcut) {
+            Ok(_) => log::info!("Çeviri kısayol kaydedildi (global): {}", shortcut),
+            Err(e) => log::warn!("Çeviri kısayol kaydedilemedi: {}", e),
+        }
+    }
+}
+
+/// Context menu penceresine Win32 stillerini uygula
+fn setup_context_menu_win32(app_handle: tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+
+        if let Some(window) = app_handle.get_webview_window("context-menu") {
+            if let Ok(raw_hwnd) = window.hwnd() {
+                let hwnd = raw_hwnd.0 as isize;
+
+                extern "system" {
+                    fn SetWindowLongPtrW(hwnd: isize, index: i32, val: isize) -> isize;
+                    fn SetClassLongPtrW(hwnd: isize, index: i32, val: isize) -> isize;
+                    fn LoadLibraryA(name: *const u8) -> isize;
+                    fn GetProcAddress(module: isize, name: *const u8) -> isize;
+                    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, w: i32, h: i32, flags: u32) -> i32;
+                }
+
+                const GWL_EXSTYLE: i32 = -20;
+                const GWL_STYLE: i32 = -16;
+                const WS_EX_NOACTIVATE: isize = 0x08000000;
+                const WS_EX_TOOLWINDOW: isize = 0x00000080;
+                const WS_EX_TOPMOST: isize = 0x00000008;
+                const SWP_NOMOVE: u32 = 0x0002;
+                const SWP_NOSIZE: u32 = 0x0001;
+                const SWP_NOZORDER: u32 = 0x0004;
+                const SWP_FRAMECHANGED: u32 = 0x0020;
+
+                unsafe {
+                    // Tam popup stili — caption, border, sysmenu, min/max HEPSI kaldirildi
+                    // WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
+                    let popup_style: isize = 0x80000000u32 as isize | 0x02000000 | 0x04000000;
+                    SetWindowLongPtrW(hwnd, GWL_STYLE, popup_style);
+
+                    // Extended style — noactivate + toolwindow + topmost (sifirdan ayarla)
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE,
+                        WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST
+                    );
+
+                    // Pencere sinifinin arka plan fircasini kaldir (beyaz arka plan onleme)
+                    const GCLP_HBRBACKGROUND: i32 = -10;
+                    SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, 0);
+
+                    // DWM ayarlari — frame'i tamamen kapat, saf CSS ile yonet
+                    let dwm = LoadLibraryA(b"dwmapi.dll\0".as_ptr());
+                    if dwm != 0 {
+                        let attr_fn = GetProcAddress(dwm, b"DwmSetWindowAttribute\0".as_ptr());
+                        if attr_fn != 0 {
+                            let f: unsafe extern "system" fn(isize, u32, *const u32, u32) -> i32 = std::mem::transmute(attr_fn);
+                            // DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED — DWM non-client cizimi kapat
+                            let v: u32 = 1;
+                            f(hwnd, 2, &v, 4);
+                            // DWMWA_TRANSITIONS_FORCEDISABLED — animasyonlari kapat
+                            let v: u32 = 1;
+                            f(hwnd, 3, &v, 4);
+                            // DWMWCP_DONOTROUND — DWM kose yuvarlama kapatildi (CSS halleder)
+                            let v: u32 = 1;
+                            f(hwnd, 33, &v, 4);
+                            // DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE — DWM border gizle
+                            let v: u32 = 0xFFFFFFFE;
+                            f(hwnd, 34, &v, 4);
+                            // DWMWA_CAPTION_COLOR = DWMWA_COLOR_NONE — caption gizle
+                            let v: u32 = 0xFFFFFFFE;
+                            f(hwnd, 35, &v, 4);
+                        }
+                    }
+
+                    SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                    // Mouse hook'a HWND kaydet (tik kontrolleri icin)
+                    mouse_hook::set_context_menu_hwnd(hwnd);
+                    eprintln!("[context-menu] Win32 stiller uygulandı: HWND={}", hwnd);
+                }
+            }
+        }
+    });
+}
+
+// ─── Ceviri Tauri Komutlari ───
+
+#[tauri::command]
+async fn translate_text(
+    text: String,
+    source_lang: String,
+    target_lang: String,
+    engine: String,
+    deepl_api_key: String,
+) -> Result<translate::TranslateResponse, String> {
+    eprintln!(
+        "[tauri-cmd] translate_text: engine={}, src={}, tgt={}, len={}",
+        engine, source_lang, target_lang, text.len()
+    );
+    translate::translate(&text, &source_lang, &target_lang, &engine, &deepl_api_key).await
+}
+
+// ─── Context Menu Pencere Komutlari ───
+
+/// Secim metniyle birlikte context-menu penceresini goster
+/// 3 katmanli iletisim: eval (birincil) + event (yedek) + polling (son care)
+pub(crate) fn show_context_menu_with_text(app: &tauri::AppHandle, text: &str, x: i32, y: i32) {
+    // Secimi kaydet (polling fallback icin)
+    *PENDING_SELECTION.lock() = Some((text.to_string(), x, y));
+
+    // Pencereyi goster — cursor'un USTUNDE, ortaya hizali (PopClip tarzi)
+    show_context_menu_internal(app, x, y);
+
+    // eval ile dogrudan JS enjeksiyonu (en guvenilir yontem)
+    let app2 = app.clone();
+    let text_owned = text.to_string();
+    std::thread::spawn(move || {
+        let payload = serde_json::json!({
+            "text": text_owned,
+            "x": x,
+            "y": y
+        });
+        let js = format!(
+            "if(window.__fisiltiSetSelection)window.__fisiltiSetSelection({})",
+            payload
+        );
+        // Birden fazla deneme — WebView2 uyanma gecikmesi icin
+        for delay in [60, 200, 500] {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            if let Some(window) = app2.get_webview_window("context-menu") {
+                window.eval(&js).ok();
+                // Ayrica Tauri event de gonder
+                window.emit("selection-detected", &payload).ok();
+            }
+        }
+    });
+}
+
+/// Mouse hook'tan dogrudan cagrilir — pencereyi goster
+pub(crate) fn show_context_menu_internal(app: &tauri::AppHandle, x: i32, y: i32) {
+    let dpr = get_dpi_scale();
+    // Icerik boyutu + golge padding (CSS tarafinda SHADOW_PAD = 10px)
+    let shadow_pad = (10.0 * dpr) as i32;
+    let inner_w = (220.0 * dpr) as i32;
+    let inner_h = (36.0 * dpr) as i32;
+    let width = inner_w + shadow_pad * 2;
+    let height = inner_h + shadow_pad * 2;
+
+    if let Some(window) = app.get_webview_window("context-menu") {
+        window.show().ok();
+        window.set_ignore_cursor_events(false).ok();
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(raw_hwnd) = window.hwnd() {
+                let hwnd = raw_hwnd.0 as isize;
+                extern "system" {
+                    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, w: i32, h: i32, flags: u32) -> i32;
+                    fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+                    fn SetWindowLongPtrW(hwnd: isize, index: i32, val: isize) -> isize;
+                }
+                const HWND_TOPMOST: isize = -1;
+                const SWP_NOACTIVATE: u32 = 0x0010;
+                const SWP_FRAMECHANGED: u32 = 0x0020;
+                const SW_SHOWNOACTIVATE: i32 = 4;
+
+                let (screen_w, screen_h) = get_screen_size();
+                let gap = (12.0 * dpr) as i32;
+                let mut final_x = x - width / 2;
+                // Visual popup alt kenari = y - gap
+                let mut final_y = y - gap - shadow_pad - inner_h;
+
+                // Ekran sinirlari
+                if final_y < 0 { final_y = y + gap - shadow_pad; }
+                if final_x < 0 { final_x = 0; }
+                if final_x + width > screen_w { final_x = screen_w - width; }
+                if final_y + height > screen_h { final_y = screen_h - height; }
+
+                unsafe {
+                    // Her gosterimde popup stilini zorla (Tauri resetleyebilir)
+                    // WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
+                    let popup_style: isize = 0x80000000u32 as isize | 0x02000000 | 0x04000000;
+                    SetWindowLongPtrW(hwnd, -16, popup_style); // GWL_STYLE
+                    // WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST
+                    SetWindowLongPtrW(hwnd, -20, 0x08000000 | 0x00000080 | 0x00000008); // GWL_EXSTYLE
+
+                    SetWindowPos(hwnd, HWND_TOPMOST, final_x, final_y, width, height, SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                }
+            }
+        }
+        eprintln!("[context-menu] Dogrudan gösterildi: x={}, y={}, {}x{}", x, y, width, height);
+    }
+}
+
+/// Bekleyen secimi al (React polling fallback icin)
+#[tauri::command]
+fn get_pending_selection() -> Option<serde_json::Value> {
+    PENDING_SELECTION.lock().take().map(|(text, x, y)| {
+        serde_json::json!({"text": text, "x": x, "y": y})
+    })
+}
+
+/// DPI scale al
+#[cfg(target_os = "windows")]
+fn get_dpi_scale() -> f64 {
+    extern "system" {
+        fn GetDC(hwnd: isize) -> isize;
+        fn GetDeviceCaps(hdc: isize, index: i32) -> i32;
+        fn ReleaseDC(hwnd: isize, hdc: isize) -> i32;
+    }
+    const LOGPIXELSX: i32 = 88;
+    unsafe {
+        let hdc = GetDC(0);
+        let dpi = GetDeviceCaps(hdc, LOGPIXELSX);
+        ReleaseDC(0, hdc);
+        if dpi > 0 { dpi as f64 / 96.0 } else { 1.0 }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_dpi_scale() -> f64 { 1.0 }
+
+#[tauri::command]
+fn show_context_menu(app: tauri::AppHandle, x: i32, y: i32, width: i32, height: i32) {
+    if let Some(window) = app.get_webview_window("context-menu") {
+        window.show().ok();
+        window.set_ignore_cursor_events(false).ok();
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(raw_hwnd) = window.hwnd() {
+                let hwnd = raw_hwnd.0 as isize;
+                extern "system" {
+                    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, w: i32, h: i32, flags: u32) -> i32;
+                    fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+                }
+                const HWND_TOPMOST: isize = -1;
+                const SWP_NOACTIVATE: u32 = 0x0010;
+                const SW_SHOWNOACTIVATE: i32 = 4;
+
+                let (screen_w, screen_h) = get_screen_size();
+                let final_x = if x + width > screen_w { screen_w - width } else { x };
+                let final_y = if y + height > screen_h { y - height } else { y };
+
+                unsafe {
+                    SetWindowPos(hwnd, HWND_TOPMOST, final_x, final_y, width, height, SWP_NOACTIVATE);
+                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                }
+            }
+        }
+        eprintln!("[context-menu] Gösterildi: x={}, y={}, {}x{}", x, y, width, height);
+    }
+}
+
+/// Context-menu'yu gizle (hem Tauri komutu hem mouse hook'tan cagrilir)
+pub(crate) fn hide_context_menu_internal(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("context-menu") {
+        window.hide().ok();
+        mouse_hook::reset_text_hash();
+        eprintln!("[context-menu] Gizlendi");
+    }
+}
+
+#[tauri::command]
+fn hide_context_menu(app: tauri::AppHandle) {
+    hide_context_menu_internal(&app);
+}
+
+/// Context-menu pencere suruklemesini baslat (mouse hook uzerinden)
+#[tauri::command]
+fn start_context_menu_drag(app: tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(window) = app.get_webview_window("context-menu") {
+            if let Ok(raw_hwnd) = window.hwnd() {
+                let hwnd = raw_hwnd.0 as isize;
+                #[repr(C)]
+                struct Pt { x: i32, y: i32 }
+                extern "system" {
+                    fn GetCursorPos(point: *mut Pt) -> i32;
+                    fn GetWindowRect(hwnd: isize, rect: *mut [i32; 4]) -> i32;
+                }
+                let mut cursor = Pt { x: 0, y: 0 };
+                let mut rect = [0i32; 4];
+                unsafe {
+                    GetCursorPos(&mut cursor);
+                    GetWindowRect(hwnd, &mut rect);
+                }
+                mouse_hook::start_drag(hwnd, cursor.x, cursor.y, rect[0], rect[1]);
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn resize_context_menu(app: tauri::AppHandle, width: i32, height: i32) {
+    if let Some(window) = app.get_webview_window("context-menu") {
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(raw_hwnd) = window.hwnd() {
+                let hwnd = raw_hwnd.0 as isize;
+                extern "system" {
+                    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, w: i32, h: i32, flags: u32) -> i32;
+                    fn GetWindowRect(hwnd: isize, rect: *mut [i32; 4]) -> i32;
+                }
+                const HWND_TOPMOST: isize = -1;
+                const SWP_NOACTIVATE: u32 = 0x0010;
+
+                // Gercek pencere konumunu al (kullanici suruklenmis olabilir)
+                let mut rect = [0i32; 4]; // left, top, right, bottom
+                unsafe { GetWindowRect(hwnd, &mut rect); }
+                let mut cx = rect[0];
+                let mut cy = rect[1];
+
+                let (screen_w, screen_h) = get_screen_size();
+
+                if cx + width > screen_w {
+                    cx = screen_w - width - 8;
+                }
+                if cx < 0 { cx = 4; }
+                if cy + height > screen_h {
+                    cy = screen_h - height - 8;
+                }
+                if cy < 0 { cy = 4; }
+
+                unsafe {
+                    SetWindowPos(hwnd, HWND_TOPMOST, cx, cy, width, height, SWP_NOACTIVATE);
+                }
+            }
+        }
+        eprintln!("[context-menu] Boyut ve konum güncellendi: {}x{}", width, height);
+    }
+}
+
+/// Ekran boyutlarini al (birincil monitor)
+#[cfg(target_os = "windows")]
+fn get_screen_size() -> (i32, i32) {
+    extern "system" {
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+    const SM_CXSCREEN: i32 = 0;
+    const SM_CYSCREEN: i32 = 1;
+    unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_screen_size() -> (i32, i32) {
+    (1920, 1080)
+}
+
+// ─── Ceviri Kisayolu ───
+
+#[tauri::command]
+fn change_translate_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    // Mevcut kisayollari oku
+    let main_shortcut = {
+        use tauri_plugin_store::StoreExt;
+        app.store("settings.json").ok()
+            .and_then(|store| store.get("shortcut"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Ctrl+Shift+Space".to_string())
+    };
+    let tts_shortcut = {
+        use tauri_plugin_store::StoreExt;
+        app.store("settings.json").ok()
+            .and_then(|store| store.get("tts_shortcut"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Ctrl+Shift+R".to_string())
+    };
+
+    // Global shortcut'lari temizle (hook haric)
+    app.global_shortcut().unregister_all()
+        .map_err(|e| format!("Kısayollar kaldırılamadı: {}", e))?;
+
+    // Hook tuslarini sifirla
+    keyboard_hook::set_key(0);
+    keyboard_hook::set_tts_key(0);
+    keyboard_hook::set_translate_key(0);
+
+    // Ana kisayolu tekrar kaydet
+    if keyboard_hook::is_single_key(&main_shortcut) {
+        if let Some(vk) = keyboard_hook::key_name_to_vk(&main_shortcut) {
+            keyboard_hook::set_key(vk);
+        }
+    } else {
+        register_shortcut(&app, &main_shortcut).ok();
+    }
+
+    // TTS kisayolunu tekrar kaydet
+    if keyboard_hook::is_single_key(&tts_shortcut) {
+        if let Some(vk) = keyboard_hook::key_name_to_vk(&tts_shortcut) {
+            keyboard_hook::set_tts_key(vk);
+        }
+    } else {
+        register_tts_shortcut(&app, &tts_shortcut).ok();
+    }
+
+    // Yeni ceviri kisayolunu kaydet
+    if keyboard_hook::is_single_key(&shortcut) {
+        let vk = keyboard_hook::key_name_to_vk(&shortcut)
+            .ok_or_else(|| format!("Bilinmeyen tuş: {}", shortcut))?;
+        keyboard_hook::set_translate_key(vk);
+        log::info!("Çeviri kısayol değiştirildi (hook): {} (vk={:#x})", shortcut, vk);
+        Ok(())
+    } else {
+        match register_translate_shortcut(&app, &shortcut) {
+            Ok(_) => {
+                log::info!("Çeviri kısayol değiştirildi (global): {}", shortcut);
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("Yeni çeviri kısayol atanamadı: {}", e);
+                Err(format!("Geçersiz kısayol: {}", shortcut))
+            }
+        }
+    }
+}
+
+fn register_translate_shortcut(app_handle: &tauri::AppHandle, shortcut: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let app = app_handle.clone();
+    app_handle.global_shortcut().on_shortcut(shortcut, move |_app, sc, event| {
+        if SHORTCUTS_SUSPENDED.load(Ordering::Relaxed) { return; }
+        if let tauri_plugin_global_shortcut::ShortcutState::Pressed = event.state {
+            log::info!("Çeviri kısayol basıldı: {:?}", sc);
+            let app_clone = app.clone();
+            std::thread::spawn(move || {
+                trigger_translate(app_clone);
+            });
+        }
+    }).map_err(|e| format!("{}", e))
+}
+
+/// Ceviri kisayolu tetiklendiginde secili metni alip event yayan mantik
+pub(crate) fn trigger_translate(app: tauri::AppHandle) {
+    // UIA ile secili metni dogrudan al
+    #[cfg(target_os = "windows")]
+    let uia_text = get_selected_text_uia();
+    #[cfg(not(target_os = "windows"))]
+    let uia_text: Option<String> = None;
+
+    let text = if let Some(t) = uia_text {
+        eprintln!("[translate-shortcut] UIA ile metin alındı: {} karakter", t.len());
+        t
+    } else {
+        eprintln!("[translate-shortcut] UIA başarısız, clipboard fallback...");
+
+        // Clipboard'u temizle
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            cb.set_text(String::new()).ok();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        // WM_COPY ile kopyala
+        copy_via_wm_copy();
+
+        let mut result = String::new();
+        for attempt in 0..8 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                if let Ok(txt) = cb.get_text() {
+                    if !txt.trim().is_empty() {
+                        result = txt;
+                        eprintln!("[translate-shortcut] WM_COPY: clipboard {}ms'de doldu", (attempt + 1) * 50);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // WM_COPY basarisiz ise SendInput Ctrl+C
+        if result.trim().is_empty() {
+            simulate_ctrl_c();
+            for attempt in 0..8 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    if let Ok(txt) = cb.get_text() {
+                        if !txt.trim().is_empty() {
+                            result = txt;
+                            eprintln!("[translate-shortcut] SendInput: clipboard {}ms'de doldu", (attempt + 1) * 50);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    };
+
+    if text.trim().is_empty() {
+        eprintln!("[translate-shortcut] Metin alınamadı");
+        return;
+    }
+
+    // Imleç konumunu al
+    let (cursor_x, cursor_y) = get_cursor_position();
+
+    eprintln!("[translate-shortcut] {} karakter, konum=({}, {})", text.len(), cursor_x, cursor_y);
+
+    // Pencereyi goster + eval/event/polling ile metni ilet
+    show_context_menu_with_text(&app, &text, cursor_x, cursor_y);
+}
+
+/// Imleç konumunu al
+fn get_cursor_position() -> (i32, i32) {
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct Pt { x: i32, y: i32 }
+        extern "system" {
+            fn GetCursorPos(p: *mut Pt) -> i32;
+        }
+        unsafe {
+            let mut p = Pt { x: 0, y: 0 };
+            GetCursorPos(&mut p);
+            (p.x, p.y)
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    { (0, 0) }
 }
 
 // ─── Edge TTS Tauri Komutlari ───

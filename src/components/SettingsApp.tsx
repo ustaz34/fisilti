@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { SettingsPanel } from "./SettingsPanel";
 import { StatsPanel } from "./StatsPanel";
@@ -9,6 +8,14 @@ import { HistoryPanel } from "./HistoryPanel";
 import { ColorsPanel } from "./ColorsPanel";
 import { CloudEnginesPanel } from "./CloudEnginesPanel";
 import { TTSPanel } from "./TTSPanel";
+import { TranslatePanel } from "./TranslatePanel";
+import { ExtensionsPanel } from "./ExtensionsPanel";
+import { TemplatesPanel } from "./TemplatesPanel";
+import { GamificationPanel } from "./GamificationPanel";
+import { MeetingPanel } from "./MeetingPanel";
+import { AIAssistantPanel } from "./AIAssistantPanel";
+import { CollabPanel } from "./CollabPanel";
+import { LiveTranslatePanel } from "./LiveTranslatePanel";
 import { useSettingsStore, type AppSettings } from "../stores/settingsStore";
 import { useTranscriptionStore } from "../stores/transcriptionStore";
 import { useRecordingStore } from "../stores/recordingStore";
@@ -17,18 +24,29 @@ import { getTTSService } from "../lib/ttsService";
 import { getSettings } from "../lib/tauri-commands";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { listen } from "@tauri-apps/api/event";
+import { ToastContainer, showToast } from "./ToastNotification";
+import { useGamificationStore } from "../stores/gamificationStore";
+import { useCollabStore } from "../stores/collabStore";
 
-type Tab = "general" | "cloud" | "models" | "stats" | "learning" | "history" | "colors" | "seslendir" | "about";
+type Tab = "general" | "cloud" | "extensions" | "models" | "stats" | "learning" | "history" | "colors" | "seslendir" | "translate" | "live-translate" | "templates" | "gamification" | "meeting" | "ai-assistant" | "collab" | "about";
 
 const TAB_TITLES: Record<Tab, string> = {
   general: "Genel Ayarlar",
   cloud: "Bulut Motorlari",
+  extensions: "Eklentiler",
   models: "Modeller",
   stats: "Istatistikler",
   learning: "Ogrenme",
   history: "Gecmis",
   colors: "Renkler",
   seslendir: "Seslendir",
+  translate: "Ceviri",
+  "live-translate": "Canli Ceviri",
+  templates: "Sablonlar",
+  gamification: "Basarimlar",
+  meeting: "Toplanti",
+  "ai-assistant": "AI Asistan",
+  collab: "Isbirligi",
   about: "Hakkinda",
 };
 
@@ -37,7 +55,6 @@ export function SettingsApp() {
   const [closing, setClosing] = useState(false);
   const [splash, setSplash] = useState<"visible" | "fading" | "gone">("visible");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
-  const appWindow = getCurrentWindow();
   const { updateSettings } = useSettingsStore();
 
   // Splash screen zamanlayicisi
@@ -48,6 +65,90 @@ export function SettingsApp() {
       clearTimeout(fadeTimer);
       clearTimeout(hideTimer);
     };
+  }, []);
+
+  // Gamification state'ini uygulama baslatildiginda yukle
+  useEffect(() => {
+    useGamificationStore.getState().loadState();
+  }, []);
+
+  // Basarim bildirimi dinle (overlay penceresinden gelir)
+  useEffect(() => {
+    const unlisten = listen<{ title: string; icon: string; xp: number }>(
+      "achievement-unlocked",
+      (event) => {
+        const { title, icon, xp } = event.payload;
+        showToast({
+          type: "success",
+          title: `${icon} ${title}`,
+          message: `+${xp} XP kazanildi!`,
+          duration: 4000,
+        });
+        // Main pencerenin gamification store'unu da diskten yenile
+        useGamificationStore.getState().loadState();
+      }
+    );
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  // Sablon ses tetikleyici bildirimi dinle (overlay penceresinden gelir)
+  useEffect(() => {
+    const unlisten = listen<{ name: string; id: string; hasCustomVars?: boolean; customVars?: string[] }>(
+      "template-applied",
+      (event) => {
+        const { name, hasCustomVars, customVars } = event.payload;
+        if (hasCustomVars) {
+          showToast({
+            type: "info",
+            title: `Sablon: ${name}`,
+            message: `Ozel degiskenler var (${customVars?.join(", ")}). Sablonlar panelinden doldurun.`,
+            duration: 5000,
+          });
+        } else {
+          showToast({
+            type: "success",
+            title: `Sablon: ${name}`,
+            message: "Ses tetikleyici ile uygulandi ve yapistirildi",
+            duration: 3000,
+          });
+        }
+      }
+    );
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  // Transkript hazir event'i dinle (collab broadcast icin)
+  useEffect(() => {
+    const unlisten = listen<{ text: string }>(
+      "transcript-ready",
+      (event) => {
+        const cStore = useCollabStore.getState();
+        if (cStore.sessionId) {
+          cStore.updateTranscript(event.payload.text);
+        }
+      }
+    );
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  // Dahili tab navigasyonu (diger panellerden gelen yonlendirme)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const tab = (e as CustomEvent).detail as Tab;
+      if (tab && TAB_TITLES[tab]) setActiveTab(tab);
+    };
+    window.addEventListener("navigate-settings-tab", handler);
+    return () => window.removeEventListener("navigate-settings-tab", handler);
+  }, []);
+
+  // WebView2 focus fix: her mousedown'da window.focus() cagir
+  // Windows'ta transparent + decorations:false pencerelerde WebView2
+  // odaklanamadiginda sol tiklama calismiyor — bu listener
+  // her tiklama oncesi WebView2'ye focus verir.
+  useEffect(() => {
+    const forceFocus = () => { window.focus(); };
+    document.addEventListener("mousedown", forceFocus, { capture: true });
+    return () => document.removeEventListener("mousedown", forceFocus, { capture: true });
   }, []);
 
   useEffect(() => {
@@ -84,6 +185,32 @@ export function SettingsApp() {
           notifications: saved.notifications ?? true,
           logLevel: saved.log_level ?? "info",
           ttsShortcut: saved.tts_shortcut ?? "Ctrl+Shift+R",
+          translateEngine: saved.translate_engine ?? "google",
+          deeplApiKey: saved.deepl_api_key ?? "",
+          translateTargetLang: saved.translate_target_lang ?? "en",
+          translateSourceLang: saved.translate_source_lang ?? "auto",
+          translateAutoDetect: saved.translate_auto_detect ?? true,
+          translateShortcut: saved.translate_shortcut ?? "Ctrl+Shift+T",
+          aiProvider: saved.ai_provider ?? "groq",
+          groqApiKey: saved.groq_api_key ?? "",
+          geminiApiKey: saved.gemini_api_key ?? "",
+          ollamaModel: saved.ollama_model ?? "llama3.1",
+          features: saved.features ? {
+            voiceCommands: saved.features.voice_commands ?? true,
+            sentiment: saved.features.sentiment ?? false,
+            gamification: saved.features.gamification ?? true,
+            templates: saved.features.templates ?? true,
+            threeDVisualizer: saved.features.three_d_visualizer ?? false,
+            liveCaptions: saved.features.live_captions ?? true,
+            ambientTheme: saved.features.ambient_theme ?? false,
+            meetingMode: saved.features.meeting_mode ?? true,
+            aiAssistant: saved.features.ai_assistant ?? false,
+            collaboration: saved.features.collaboration ?? true,
+            clipboardManager: saved.features.clipboard_manager ?? true,
+            mouseGestures: saved.features.mouse_gestures ?? false,
+            radialMenu: saved.features.radial_menu ?? false,
+            liveTranslation: saved.features.live_translation ?? false,
+          } : undefined,
         });
       })
       .catch(console.error);
@@ -107,6 +234,16 @@ export function SettingsApp() {
     return () => {
       unlistenHistory.then((fn) => fn());
     };
+  }, []);
+
+  // Tab navigasyonu event'i (ExtensionsPanel'den gelir)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const tab = (e as CustomEvent).detail as Tab;
+      if (tab && TAB_TITLES[tab]) setActiveTab(tab);
+    };
+    window.addEventListener("navigate-settings-tab", handler);
+    return () => window.removeEventListener("navigate-settings-tab", handler);
   }, []);
 
   // Wake word durum bildirimlerini overlay penceresinden dinle
@@ -160,6 +297,12 @@ export function SettingsApp() {
               notifications: saved.notifications ?? true,
               logLevel: saved.log_level ?? "info",
               ttsShortcut: saved.tts_shortcut ?? "Ctrl+Shift+R",
+              translateEngine: saved.translate_engine ?? "google",
+              deeplApiKey: saved.deepl_api_key ?? "",
+              translateTargetLang: saved.translate_target_lang ?? "en",
+              translateSourceLang: saved.translate_source_lang ?? "auto",
+              translateAutoDetect: saved.translate_auto_detect ?? true,
+              translateShortcut: saved.translate_shortcut ?? "Ctrl+Shift+T",
             });
           })
           .catch(console.error);
@@ -252,6 +395,8 @@ export function SettingsApp() {
   return (
     <div className={`w-full h-screen bg-[var(--color-bg-primary)] rounded-2xl overflow-hidden flex shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_8px_32px_rgba(0,0,0,0.4)] transition-[opacity,transform] duration-300 ${closing ? "opacity-0 scale-95" : "opacity-100 scale-100"}`}>
 
+      <ToastContainer />
+
       {/* Kapanis bildirimi */}
       {closing && (
         <div className="absolute inset-0 z-50 flex items-center justify-center rounded-2xl" style={{ background: "rgba(var(--bg-primary-rgb), 0.95)" }}>
@@ -274,14 +419,13 @@ export function SettingsApp() {
         onMouseEnter={() => setSidebarExpanded(true)}
         onMouseLeave={() => setSidebarExpanded(false)}
       >
-        {/* Logo - drag area */}
+        {/* Logo - drag area (CSS app-region ile surukleme) */}
         <div
-          className={`flex items-center cursor-move flex-shrink-0 ${
+          className={`flex items-center cursor-move flex-shrink-0 drag-region ${
             sidebarExpanded
               ? "px-4 gap-3 h-[52px]"
               : "justify-center h-[48px]"
           }`}
-          onMouseDown={() => appWindow.startDragging()}
         >
           <img
             src="/logo.png"
@@ -316,6 +460,12 @@ export function SettingsApp() {
           <NavButton active={activeTab === "cloud"} label="Bulut" expanded={sidebarExpanded} onClick={() => setActiveTab("cloud")}>
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+            </svg>
+          </NavButton>
+
+          <NavButton active={activeTab === "extensions"} label="Eklentiler" expanded={sidebarExpanded} onClick={() => setActiveTab("extensions")}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
             </svg>
           </NavButton>
 
@@ -364,6 +514,57 @@ export function SettingsApp() {
             </svg>
           </NavButton>
 
+          <NavButton active={activeTab === "translate"} label="Ceviri" expanded={sidebarExpanded} onClick={() => setActiveTab("translate")}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2h1"/>
+              <path d="M22 22l-5-10-5 10M14 18h6"/>
+            </svg>
+          </NavButton>
+
+          <NavButton active={activeTab === "live-translate"} label="Canli Ceviri" expanded={sidebarExpanded} onClick={() => setActiveTab("live-translate")}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M22 22l-3-6-3 6M17 20h4"/>
+            </svg>
+          </NavButton>
+
+          <NavButton active={activeTab === "templates"} label="Sablonlar" expanded={sidebarExpanded} onClick={() => setActiveTab("templates")}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2"/>
+              <path d="M3 9h18M9 21V9"/>
+            </svg>
+          </NavButton>
+
+          <NavButton active={activeTab === "ai-assistant"} label="AI Asistan" expanded={sidebarExpanded} onClick={() => setActiveTab("ai-assistant")}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2a8 8 0 0 0-8 8c0 3.4 2.1 6.3 5 7.5V20h6v-2.5c2.9-1.2 5-4.1 5-7.5a8 8 0 0 0-8-8z"/>
+              <path d="M9 22h6"/>
+            </svg>
+          </NavButton>
+
+          <NavButton active={activeTab === "gamification"} label="Basarimlar" expanded={sidebarExpanded} onClick={() => setActiveTab("gamification")}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="8" r="6"/>
+              <path d="M15.477 12.89L17 22l-5-3-5 3 1.523-9.11"/>
+            </svg>
+          </NavButton>
+
+          <NavButton active={activeTab === "meeting"} label="Toplanti" expanded={sidebarExpanded} onClick={() => setActiveTab("meeting")}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+          </NavButton>
+
+          <NavButton active={activeTab === "collab"} label="Isbirligi" expanded={sidebarExpanded} onClick={() => setActiveTab("collab")}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 0 1-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+            </svg>
+          </NavButton>
+
           <NavButton active={activeTab === "about"} label="Hakkinda" expanded={sidebarExpanded} onClick={() => setActiveTab("about")}>
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
               <circle cx="12" cy="12" r="10"/>
@@ -385,8 +586,7 @@ export function SettingsApp() {
         {/* Baslik cubugu */}
         <div className="flex items-center justify-between h-11 px-5 flex-shrink-0 select-none">
           <div
-            className="flex-1 h-full flex items-center cursor-move"
-            onMouseDown={() => appWindow.startDragging()}
+            className="flex-1 h-full flex items-center cursor-move drag-region"
           >
             <h1 className="text-[13px] font-semibold text-[rgba(255,255,255,0.7)] tracking-wide">
               {TAB_TITLES[activeTab]}
@@ -412,12 +612,20 @@ export function SettingsApp() {
         <div className="flex-1 overflow-y-auto scrollbar-thin">
           {activeTab === "general" && <GeneralTab />}
           {activeTab === "cloud" && <CloudTab />}
+          {activeTab === "extensions" && <ExtensionsTab />}
           {activeTab === "models" && <ModelsTab />}
           {activeTab === "stats" && <StatsTab />}
           {activeTab === "learning" && <LearningTab />}
           {activeTab === "history" && <HistoryTab />}
           {activeTab === "colors" && <ColorsTab />}
           {activeTab === "seslendir" && <SeslendirTab />}
+          {activeTab === "translate" && <TranslateTab />}
+          {activeTab === "live-translate" && <LiveTranslateTab />}
+          {activeTab === "templates" && <TemplatesTab />}
+          {activeTab === "gamification" && <GamificationTab />}
+          {activeTab === "meeting" && <MeetingTab />}
+          {activeTab === "ai-assistant" && <AIAssistantTab />}
+          {activeTab === "collab" && <CollabTab />}
           {activeTab === "about" && <AboutTab />}
         </div>
       </div>
@@ -585,6 +793,14 @@ function CloudTab() {
   );
 }
 
+function ExtensionsTab() {
+  return (
+    <div className="settings-content">
+      <ExtensionsPanel />
+    </div>
+  );
+}
+
 function ModelsTab() {
   return (
     <div className="py-4 px-2">
@@ -629,6 +845,62 @@ function SeslendirTab() {
   return (
     <div className="settings-content">
       <TTSPanel />
+    </div>
+  );
+}
+
+function TranslateTab() {
+  return (
+    <div className="settings-content">
+      <TranslatePanel />
+    </div>
+  );
+}
+
+function LiveTranslateTab() {
+  return (
+    <div className="settings-content">
+      <LiveTranslatePanel />
+    </div>
+  );
+}
+
+function TemplatesTab() {
+  return (
+    <div className="settings-content">
+      <TemplatesPanel />
+    </div>
+  );
+}
+
+function GamificationTab() {
+  return (
+    <div className="settings-content">
+      <GamificationPanel />
+    </div>
+  );
+}
+
+function MeetingTab() {
+  return (
+    <div className="settings-content">
+      <MeetingPanel />
+    </div>
+  );
+}
+
+function AIAssistantTab() {
+  return (
+    <div className="settings-content">
+      <AIAssistantPanel />
+    </div>
+  );
+}
+
+function CollabTab() {
+  return (
+    <div className="settings-content">
+      <CollabPanel />
     </div>
   );
 }

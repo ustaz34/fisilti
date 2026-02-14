@@ -4,10 +4,17 @@ import { OverlayBar } from "./components/OverlayBar";
 import { useSettingsStore, type AppSettings } from "./stores/settingsStore";
 import { useRecordingStore } from "./stores/recordingStore";
 import { useTTSStore } from "./stores/ttsStore";
+import { useGamificationStore } from "./stores/gamificationStore";
 import { getAudioLevels, getSettings } from "./lib/tauri-commands";
 import { useTranscription } from "./hooks/useTranscription";
 import { updateWakeWord } from "./lib/wakeWordListener";
 import { listenThemeChanges } from "./lib/themeEngine";
+import { useTemplateVoiceTrigger } from "./hooks/useTemplateVoiceTrigger";
+import {
+  startMeetingRecorder,
+  stopMeetingRecorder,
+  MTG_EVENT,
+} from "./lib/meetingRecorder";
 
 function App() {
   const { settings, updateSettings } = useSettingsStore();
@@ -15,6 +22,14 @@ function App() {
   const levelPollRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const { doStart, doStop, startVoiceActivation, stopVoiceActivation } =
     useTranscription();
+
+  // Sablon sesli tetikleyici — bagimsiz sistem, transkripsiyon pipeline'ina dokunmaz
+  useTemplateVoiceTrigger();
+
+  // Gamification state'ini overlay baslatildiginda yukle
+  useEffect(() => {
+    useGamificationStore.getState().loadState();
+  }, []);
 
   // Tema degisikliklerini dinle (ayarlar penceresinden)
   useEffect(() => {
@@ -60,6 +75,22 @@ function App() {
           notifications: saved.notifications ?? true,
           logLevel: saved.log_level ?? "info",
           ttsShortcut: saved.tts_shortcut ?? "Ctrl+Shift+R",
+          features: saved.features ? {
+            voiceCommands: saved.features.voice_commands ?? true,
+            sentiment: saved.features.sentiment ?? false,
+            gamification: saved.features.gamification ?? true,
+            templates: saved.features.templates ?? true,
+            threeDVisualizer: saved.features.three_d_visualizer ?? false,
+            liveCaptions: saved.features.live_captions ?? true,
+            ambientTheme: saved.features.ambient_theme ?? false,
+            meetingMode: saved.features.meeting_mode ?? true,
+            aiAssistant: saved.features.ai_assistant ?? false,
+            collaboration: saved.features.collaboration ?? true,
+            clipboardManager: saved.features.clipboard_manager ?? true,
+            mouseGestures: saved.features.mouse_gestures ?? false,
+            radialMenu: saved.features.radial_menu ?? false,
+            liveTranslation: saved.features.live_translation ?? false,
+          } : undefined,
         });
       })
       .catch(console.error);
@@ -161,6 +192,41 @@ function App() {
       unlisten2.then((fn) => fn());
     };
   }, []);
+
+  // ─── Toplanti modu: main pencereden gelen start/stop komutlarini dinle ───
+  // meetingRecorder OVERLAY penceresinde calisir (SpeechRecognition burada garanti).
+  // Main pencere (SettingsApp/MeetingPanel) event ile komutu gonderir.
+  useEffect(() => {
+    const unlistenStart = listen<{ language: string }>(MTG_EVENT.CMD_START, async (event) => {
+      console.log("[App] Meeting start komutu alindi, dil:", event.payload.language);
+
+      // 1) Mevcut kaydi/sesli aktivasyonu tamamen durdur
+      stopVoiceActivation();
+      doStop(); // Overlay'de devam eden kayit varsa durdur
+
+      // 2) Eski SpeechRecognition'in tam kapanmasi icin bekle (kritik!)
+      await new Promise((r) => setTimeout(r, 800));
+
+      // 3) Meeting recorder'i baslat
+      console.log("[App] Meeting recorder baslatiliyor...");
+      await startMeetingRecorder(event.payload.language);
+    });
+
+    const unlistenStop = listen(MTG_EVENT.CMD_STOP, () => {
+      console.log("[App] Meeting stop komutu alindi");
+      stopMeetingRecorder();
+      // Sesli aktivasyonu tekrar baslat (ayar aciksa)
+      const va = useSettingsStore.getState().settings.voiceActivation;
+      if (va) {
+        setTimeout(() => startVoiceActivation(), 500);
+      }
+    });
+
+    return () => {
+      unlistenStart.then((fn) => fn());
+      unlistenStop.then((fn) => fn());
+    };
+  }, [stopVoiceActivation, startVoiceActivation, doStop]);
 
   // Kayit sirasinda ses seviyesini sorgula (sadece whisper modunda)
   useEffect(() => {

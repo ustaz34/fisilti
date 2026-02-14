@@ -1,4 +1,4 @@
 [env]
 LIBCLANG_PATH = "C:\\Program Files\\LLVM\\lib"
-CMAKE_GENERATOR = "Visual Studio 17 2022"
+CMAKE_GENERATOR = "Ninja"
 BINDGEN_EXTRA_CLANG_ARGS = "--target=x86_64-pc-windows-msvc -fms-compatibility -fms-extensions -IC:\\Progra~1\\LLVM\\lib\\clang\\21\\include -IC:\\Progra~2\\MICROS~2\\2022\\BUILDT~1\\VC\\Tools\\MSVC\\1444~1.352\\include -IC:\\Progra~2\\WI3CF2~1\\10\\Include\\10.0.26100.0\\ucrt -IC:\\Progra~2\\WI3CF2~1\\10\\Include\\10.0.26100.0\\um -IC:\\Progra~2\\WI3CF2~1\\10\\Include\\10.0.26100.0\\shared"

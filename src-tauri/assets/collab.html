@@ -230,8 +230,10 @@ body{
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 (function(){
+  // Peer ID kaynagi: 1) Sunucu tarafindan gomulu, 2) URL query parametresi
+  var EMBEDDED_ID = "{{PEER_ID}}";
   var urlParams = new URLSearchParams(window.location.search);
-  var PEER_ID = urlParams.get("peer") || "";
+  var PEER_ID = (EMBEDDED_ID && EMBEDDED_ID !== "{{" + "PEER_ID" + "}}") ? EMBEDDED_ID : (urlParams.get("peer") || "");
 
   var dot = document.getElementById("statusDot");
   var txt = document.getElementById("statusText");
