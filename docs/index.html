@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Fisilti — Canli Transkripsiyon</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:#0a0f23;color:#e8e0d6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  min-height:100dvh;display:flex;flex-direction:column;overflow:hidden;
+}
+.header{
+  padding:16px 20px 12px;display:flex;align-items:center;gap:10px;
+  border-bottom:1px solid rgba(250,228,207,0.06);
+}
+.header svg{flex-shrink:0;opacity:0.5}
+.header h1{font-size:15px;font-weight:600;color:#fae4cf;letter-spacing:0.3px}
+.status-bar{
+  padding:8px 20px;display:flex;align-items:center;gap:8px;
+  background:rgba(250,228,207,0.02);border-bottom:1px solid rgba(250,228,207,0.04);
+}
+.status-dot{
+  width:8px;height:8px;border-radius:50%;flex-shrink:0;
+  transition:background 0.3s;
+}
+.status-dot.connecting{background:#f59e0b;animation:pulse 1.2s infinite}
+.status-dot.connected{background:#34d399;box-shadow:0 0 8px rgba(52,211,153,0.4)}
+.status-dot.disconnected{background:#ef4444}
+.status-text{font-size:12px;color:rgba(255,255,255,0.45)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+.transcript-area{
+  flex:1;overflow-y:auto;padding:16px 20px;
+  -webkit-overflow-scrolling:touch;
+}
+.transcript-area p{
+  font-size:15px;line-height:1.7;color:rgba(255,255,255,0.7);
+  white-space:pre-wrap;word-break:break-word;
+}
+.empty-state{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:12px;padding:40px 20px;text-align:center;
+}
+.empty-state svg{opacity:0.15}
+.empty-state span{font-size:13px;color:rgba(255,255,255,0.2)}
+.error-box{
+  margin:20px;padding:20px;border-radius:12px;text-align:center;
+  background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.12);
+}
+.error-box h2{font-size:14px;color:rgba(239,68,68,0.8);margin-bottom:8px}
+.error-box p{font-size:12px;color:rgba(255,255,255,0.35);line-height:1.6}
+.error-box code{
+  display:inline-block;margin-top:8px;padding:4px 10px;border-radius:6px;
+  background:rgba(255,255,255,0.04);font-size:11px;color:rgba(250,228,207,0.5);
+}
+.footer{
+  padding:10px 20px;text-align:center;
+  border-top:1px solid rgba(250,228,207,0.04);
+  font-size:10px;color:rgba(255,255,255,0.15);
+}
+.new-text{animation:fadeIn 0.3s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+  <div class="header">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fae4cf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+      <line x1="12" y1="19" x2="12" y2="23"/>
+      <line x1="8" y1="23" x2="16" y2="23"/>
+    </svg>
+    <h1>Fisilti</h1>
+  </div>
+
+  <div class="status-bar">
+    <div id="statusDot" class="status-dot connecting"></div>
+    <span id="statusText" class="status-text">Hazırlaniyor...</span>
+  </div>
+
+  <div id="errorBox" class="error-box" style="display:none"></div>
+
+  <div id="transcriptArea" class="transcript-area">
+    <div class="empty-state" id="emptyState">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+      </svg>
+      <span>Masaustune baglanildi. Metin bekleniyor...</span>
+    </div>
+  </div>
+
+  <div class="footer">Fisilti Isbirligi &middot; WebRTC P2P baglanti</div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(function(){
+  var urlParams = new URLSearchParams(window.location.search);
+  var PEER_ID = urlParams.get("peer") || "";
+
+  var dot = document.getElementById("statusDot");
+  var txt = document.getElementById("statusText");
+  var area = document.getElementById("transcriptArea");
+  var empty = document.getElementById("emptyState");
+  var errorBox = document.getElementById("errorBox");
+
+  var peer = null;
+  var conn = null;
+  var attempt = 0;
+  var MAX_ATTEMPTS = 20;
+  var BASE_DELAY = 1000;
+
+  function setStatus(state, msg){
+    dot.className = "status-dot " + state;
+    txt.textContent = msg;
+  }
+
+  function showError(title, desc, hint){
+    area.style.display = "none";
+    errorBox.style.display = "block";
+    errorBox.innerHTML = "<h2>" + title + "</h2><p>" + desc + "</p>" + (hint ? "<code>" + hint + "</code>" : "");
+  }
+
+  function showTranscript(text){
+    if(!text) return;
+    empty.style.display = "none";
+    area.innerHTML = text.split("\n").map(function(line){
+      return '<p class="new-text">' + escapeHtml(line) + '</p>';
+    }).join("");
+    area.scrollTop = area.scrollHeight;
+  }
+
+  function escapeHtml(s){
+    var d = document.createElement("div");
+    d.appendChild(document.createTextNode(s));
+    return d.innerHTML;
+  }
+
+  function connect(){
+    if(attempt >= MAX_ATTEMPTS){
+      setStatus("disconnected", "Baglanti kurulamadi");
+      showError(
+        "Baglanti Basarisiz",
+        "Masaustu uygulamasina baglanilamadi. Oturumun hala aktif oldugunu kontrol edip sayfayi yenileyin.",
+        "Deneme: " + MAX_ATTEMPTS + "/" + MAX_ATTEMPTS
+      );
+      return;
+    }
+    attempt++;
+    var delay = Math.min(BASE_DELAY * Math.pow(1.5, attempt - 1), 15000);
+    setStatus("connecting", "Baglaniyor... (" + attempt + ". deneme)");
+
+    if(peer){ try{ peer.destroy(); }catch(e){} }
+
+    peer = new Peer();
+
+    peer.on("open", function(){
+      conn = peer.connect(PEER_ID, { reliable: true });
+
+      conn.on("open", function(){
+        attempt = 0;
+        setStatus("connected", "Bagli — canli transkripsiyon aktif");
+        conn.send({ type: "peer-join", peerId: peer.id, name: "Uzak Tarayici" });
+      });
+
+      conn.on("data", function(data){
+        if(data && data.type === "transcript"){
+          showTranscript(data.text || "");
+        }
+      });
+
+      conn.on("close", function(){
+        setStatus("disconnected", "Baglanti kesildi, yeniden deneniyor...");
+        setTimeout(connect, delay);
+      });
+
+      conn.on("error", function(){
+        setStatus("disconnected", "Baglanti hatasi, yeniden deneniyor...");
+        setTimeout(connect, delay);
+      });
+    });
+
+    peer.on("error", function(err){
+      var errType = err.type || "bilinmeyen";
+      if(errType === "peer-unavailable"){
+        setStatus("disconnected", "Oturum bulunamadi, yeniden deneniyor...");
+      } else {
+        setStatus("disconnected", "Hata: " + errType);
+      }
+      setTimeout(connect, delay);
+    });
+
+    peer.on("disconnected", function(){
+      setStatus("disconnected", "Baglanti kesildi, yeniden deneniyor...");
+      setTimeout(connect, delay);
+    });
+  }
+
+  // PeerJS yuklendi mi kontrol et
+  if(typeof Peer === "undefined"){
+    setStatus("disconnected", "Yukleme hatasi");
+    showError(
+      "PeerJS Yuklenemedi",
+      "Bu sayfa internet baglantisi gerektirir. Tarayicinizin internete bagli oldugundan emin olun.",
+      "unpkg.com erisimi gerekli"
+    );
+    return;
+  }
+
+  // Peer ID kontrolu
+  if(!PEER_ID){
+    setStatus("disconnected", "Oturum bilgisi eksik");
+    showError(
+      "Oturum Bilgisi Bulunamadi",
+      "Bu baglantida oturum kimligi eksik. Masaustu uygulamasindan paylasilan URL'yi kullanin.",
+      "URL sonunda ?peer=OTURUM_ID olmali"
+    );
+    return;
+  }
+
+  // Baglantiya basla
+  connect();
+})();
+</script>
+</body>
+</html>
