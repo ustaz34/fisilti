@@ -82,7 +82,7 @@ class PeerService {
         return;
       }
 
-      const conn = this.peer.connect(peerId, { reliable: true });
+      const conn = this.peer.connect(peerId, { reliable: true, serialization: "json" });
 
       conn.on("open", () => {
         this.setupConnection(conn);
@@ -226,7 +226,7 @@ class PeerService {
 
       this.reconnectAttempts.set(remotePeerId, attempts + 1);
 
-      const conn = this.peer!.connect(remotePeerId, { reliable: true });
+      const conn = this.peer!.connect(remotePeerId, { reliable: true, serialization: "json" });
 
       conn.on("open", () => {
         console.log("[PeerService] Yeniden baglanti basarili:", remotePeerId);
